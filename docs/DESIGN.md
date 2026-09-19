@@ -229,6 +229,41 @@ compact pointer form, so the token budget buys coverage without truncating the
 strongest evidence. The score sequence is forced strictly decreasing so returned
 order and returned scores can never disagree.
 
+#### What "verbatim" means, precisely
+
+The contract says returned ``data[].content`` is "preserved verbatim for audit",
+and rule 1 forbids generating an answer or disguising one as a memory record.
+Together those impose a property we enforce as a test
+(``tests/test_traceability.py``), not as an intention:
+
+> Everything Search returns is either (a) a verbatim span of stored text, or
+> (b) a structural label or a value the platform itself supplied.
+
+Concretely, a returned item is:
+
+* zero or more header lines, each matching a closed vocabulary
+  (``[memory]``, ``[file_path]``, ``[symbol]``, …) whose values are identifiers
+  extracted from the stored text, or the source timestamp echoed from the Add
+  request;
+* the ``---`` separator;
+* a verbatim slice of stored memory text, possibly truncated.
+
+Two consequences worth stating because they are easy to get wrong:
+
+- **Truncation is allowed; rewriting is not.** Cutting a memory short to fit the
+  token budget is selection. Rephrasing it would not be audit-able against the
+  Add input, and a compact "card" asserting something the trajectory never said
+  would be fabricated evidence — not a summary of it.
+- **``[time]`` echoes the source timestamp, never our processing time.** A
+  processing timestamp is a fact about our pipeline that an auditor cannot find
+  in the input; when the source supplies no timestamp the field is omitted rather
+  than filled in.
+
+This is why the enrichment pass sketched below is specified as producing a
+*separately quoted* excerpt rather than a paraphrase. It also means the test
+suite will fail if a future change introduces free-form generation into returned
+content, which is the point.
+
 **A per-session cap is required, not cosmetic.** One session produces many chunks,
 and without a cap they crowd out other sessions: measured on the proxy benchmark,
 ~100 returned chunks collapsed to ~23 distinct sessions. Since a task is answered

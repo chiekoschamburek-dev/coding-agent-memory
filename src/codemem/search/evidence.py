@@ -178,9 +178,20 @@ def _header(
     kind: str,
     lang: str | None,
     entities: list[tuple[str, str]],
-    created_at: str | None,
+    source_ts: int | None,
     superseded: bool,
 ) -> str:
+    """Render the deterministic header: labels plus values from the memory.
+
+    Every value here is either extracted from the stored text (identifiers) or
+    supplied by the platform (the source timestamp). Nothing is invented, which
+    is what keeps the returned content auditable against what was Added.
+
+    ``source_ts`` is the message timestamp from the Add request, deliberately not
+    our own processing time: reporting when *we* wrote the row would be a fact
+    about our pipeline that says nothing about the memory, and an auditor could
+    not find it in the input.
+    """
     label = kind or "chunk"
     if lang:
         label = f"{label} · {lang}"
@@ -196,9 +207,25 @@ def _header(
         if not values:
             continue
         lines.append(f"[{etype}] " + ", ".join(values[:6]))
-    if created_at:
-        lines.append(f"[time] {created_at}")
+    stamp = _iso_from_ms(source_ts)
+    if stamp:
+        lines.append(f"[time] {stamp}")
     return "\n".join(lines)
+
+
+def _iso_from_ms(value: int | None) -> str | None:
+    """Format a source timestamp, or None when the source had none."""
+    if value is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        seconds = value / 1000.0 if abs(value) > 1e11 else float(value)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def assemble(
@@ -258,7 +285,7 @@ def assemble(
             kind=memory.structural_kind,
             lang=memory.structural_lang,
             entities=entities,
-            created_at=memory.created_at,
+            source_ts=memory.ts,
             superseded=memory.superseded_by is not None,
         )
 
