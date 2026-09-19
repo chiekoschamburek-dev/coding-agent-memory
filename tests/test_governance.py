@@ -244,8 +244,12 @@ def test_supersede_marks_old_memory_and_scores_it_lower(settings):
         )
         assert len(items) == 2, "retrieval must not drop it, only demote it"
         assert "5 attempts" in items[0].content, "the newer memory should lead"
-        assert "superseded" in items[1].content
         assert "3 attempts" in items[1].content
+        # The superseded marker travels on the identifier, not in the content:
+        # content must stay verbatim memory text.
+        assert items[1].superseded is True
+        assert items[0].superseded is False
+        assert "superseded" not in items[1].content
     finally:
         store.close()
 

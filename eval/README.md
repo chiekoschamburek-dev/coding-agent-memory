@@ -96,6 +96,19 @@ files — which is exactly dense retrieval's strength. So the dense figures here
 are a lower bound, and its advantage is probably understated rather than
 overstated.
 
+### Payload shape did not affect ranking
+
+An earlier revision padded ``content`` with a ``[memory]/[file_path]/[time]``
+header and filled ``created_at`` with our own write time. Both were wrong against
+the contract (see `docs/DESIGN.md`), and both were removed: content is now a
+verbatim span of stored memory text and ``created_at`` carries the source
+timestamp.
+
+Re-measured afterwards, the ranking is unchanged — P1 MRR 0.7248 and recall@10
+0.6655, P2c MRR 0.7718 and recall@10 0.7133, matching the pre-change figures. The
+reason is that a real session trajectory is already close to maximally compact,
+so the header was costing answer-model budget without buying ranking quality.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |

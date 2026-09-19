@@ -229,48 +229,47 @@ compact pointer form, so the token budget buys coverage without truncating the
 strongest evidence. The score sequence is forced strictly decreasing so returned
 order and returned scores can never disagree.
 
-#### What "verbatim" means, precisely
+#### The returned payload
 
-The contract says returned ``data[].content`` is "preserved verbatim for audit",
-and rule 1 forbids generating an answer or disguising one as a memory record.
-Together those impose a property we enforce as a test
-(``tests/test_traceability.py``), not as an intention:
+The contract fixes the shape, and the example value for ``content`` is plain
+remembered text:
 
-> Everything Search returns is either (a) a verbatim span of stored text, or
-> (b) a structural label or a value the platform itself supplied.
+```json
+{"data": [{"id": "mem_123", "content": "remembered fact text",
+           "score": 0.87, "created_at": "2026-07-01T12:00:00Z"}]}
+```
 
-Concretely, a returned item is:
+So ``content`` is a **verbatim span of stored memory text** — no header, no
+labels, no rewriting — and ``created_at`` carries the **source timestamp** the
+platform supplied, falling back to our persistence time only when the source had
+none. An earlier revision put a ``[memory]/[file_path]/[time]`` header inside
+``content`` and left ``created_at`` as our own write clock; that wasted the field
+the contract provides and put information in the text that an auditor could not
+find in the Add input.
 
-* zero or more header lines, each matching a closed vocabulary
-  (``[memory]``, ``[file_path]``, ``[symbol]``, …) whose values are identifiers
-  extracted from the stored text, or the source timestamp echoed from the Add
-  request;
-* the ``---`` separator;
-* a verbatim slice of stored memory text, possibly truncated.
+What we do *not* put in ``content``, and why:
 
-Two consequences worth stating because they are easy to get wrong:
+- **Extracted identifiers.** They are retrieval keys, matched against the index
+  during ranking. Duplicating them in the payload spends answer-model budget on
+  text that is already implied by the content.
+- **A compact "summary" of the memory.** The contract says returned content is
+  "preserved verbatim for audit", which only means something if an auditor can
+  locate our output in the input. A summary asserting something the trajectory
+  never said would be fabricated evidence rather than a digest of it. A real
+  session trajectory is also usually already more compact than a lossy
+  re-rendering of it, so paraphrase buys little and risks a great deal.
+- **The superseded marker.** Whether a memory was superseded is our judgement, not
+  memory text, so it travels on the ``id`` (which the contract only requires to be
+  a stable identifier) rather than editing the content.
 
-- **Truncation is allowed; rewriting is not.** Cutting a memory short to fit the
-  token budget is selection. Rephrasing it would not be audit-able against the
-  Add input, and a compact "card" asserting something the trajectory never said
-  would be fabricated evidence — not a summary of it.
-- **``[time]`` echoes the source timestamp, never our processing time.** A
-  processing timestamp is a fact about our pipeline that an auditor cannot find
-  in the input; when the source supplies no timestamp the field is omitted rather
-  than filled in.
+Truncation is the one permitted modification, and it is **selection rather than
+rewriting**. The span is chosen by query-term density rather than by taking the
+opening lines, because in a long trajectory the framing sits at the top and the
+diagnosis sits in the middle; elision is marked with ``…`` so a reader can tell a
+span from a whole.
 
-This is why the enrichment pass sketched below is specified as producing a
-*separately quoted* excerpt rather than a paraphrase. It also means the test
-suite will fail if a future change introduces free-form generation into returned
-content, which is the point.
-
-**A per-session cap is required, not cosmetic.** One session produces many chunks,
-and without a cap they crowd out other sessions: measured on the proxy benchmark,
-~100 returned chunks collapsed to ~23 distinct sessions. Since a task is answered
-from a session rather than from one chunk of it, recall depends on session
-diversity. Capping at 3 per session raised recall@100 from 0.845 to 0.919 and
-nDCG@100 from 0.681 to 0.705. Capped-out items are skipped, not truncated, so the
-slot passes to the next session instead of shortening the list.
+`tests/test_traceability.py` enforces all of this, and fails if free-form
+generation is ever introduced into returned content.
 
 ## 5. Determinism and reproducibility
 

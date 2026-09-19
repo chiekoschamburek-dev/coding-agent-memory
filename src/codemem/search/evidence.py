@@ -22,6 +22,7 @@ truncating the strongest evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from ..add.entities import ENTITY_WEIGHT
 from ..core.config import Settings
@@ -43,19 +44,6 @@ INTENT_KIND_BONUS: dict[str, dict[str, float]] = {
     "general": {},
 }
 
-# Identifiers worth echoing in the header, in priority order.
-_HEADER_ENTITIES = (
-    "file_path",
-    "file_name",
-    "symbol",
-    "exception",
-    "test",
-    "issue_id",
-    "cmd",
-    "pkg",
-)
-
-
 @dataclass(slots=True)
 class EvidenceItem:
     memory_id: int
@@ -63,6 +51,8 @@ class EvidenceItem:
     score: float
     created_at: str | None
     tokens: int
+    truncated: bool = False
+    superseded: bool = False
 
 
 # Channels that constitute actual evidence. Recency is deliberately excluded:
@@ -173,53 +163,18 @@ def score_candidates(
     return scored
 
 
-def _header(
-    *,
-    kind: str,
-    lang: str | None,
-    entities: list[tuple[str, str]],
-    source_ts: int | None,
-    superseded: bool,
-) -> str:
-    """Render the deterministic header: labels plus values from the memory.
-
-    Every value here is either extracted from the stored text (identifiers) or
-    supplied by the platform (the source timestamp). Nothing is invented, which
-    is what keeps the returned content auditable against what was Added.
-
-    ``source_ts`` is the message timestamp from the Add request, deliberately not
-    our own processing time: reporting when *we* wrote the row would be a fact
-    about our pipeline that says nothing about the memory, and an auditor could
-    not find it in the input.
-    """
-    label = kind or "chunk"
-    if lang:
-        label = f"{label} · {lang}"
-    if superseded:
-        label += " · superseded"
-    lines = [f"[memory] {label}"]
-
-    by_type: dict[str, list[str]] = {}
-    for etype, value in entities:
-        by_type.setdefault(etype, []).append(value)
-    for etype in _HEADER_ENTITIES:
-        values = by_type.get(etype)
-        if not values:
-            continue
-        lines.append(f"[{etype}] " + ", ".join(values[:6]))
-    stamp = _iso_from_ms(source_ts)
-    if stamp:
-        lines.append(f"[time] {stamp}")
-    return "\n".join(lines)
-
-
 def _iso_from_ms(value: int | None) -> str | None:
-    """Format a source timestamp, or None when the source had none."""
+    """Format a source timestamp as ISO-8601, or None when the source had none.
+
+    Only ever applied to a timestamp the platform supplied; we never substitute
+    our own processing time for a missing source time.
+    """
     if value is None:
         return None
     try:
         from datetime import datetime, timezone
 
+        # Accept both seconds and milliseconds; the contract sends milliseconds.
         seconds = value / 1000.0 if abs(value) > 1e11 else float(value)
         return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -228,10 +183,70 @@ def _iso_from_ms(value: int | None) -> str | None:
         return None
 
 
+def _select_span(text: str, budget_tokens: int, query_terms: Sequence[str]) -> tuple[str, bool]:
+    """Choose a verbatim, line-aligned span of ``text`` within the token budget.
+
+    Returns ``(span, truncated)``.
+
+    Selection is by query-term density rather than by taking the opening lines.
+    A real session trajectory is long, and its first few hundred tokens are often
+    framing chatter while the diagnosis or the fix sits in the middle. Choosing
+    the densest window keeps the most useful *verbatim* text, which matters
+    because we may not rephrase the memory to make it fit.
+
+    Ties resolve to the earliest window, so a memory with no term overlap still
+    yields its opening rather than an arbitrary slice.
+    """
+    if budget_tokens <= 0:
+        return "", True
+    if count_tokens(text) <= budget_tokens:
+        return text, False
+
+    lines = text.splitlines()
+    if not lines:
+        span = truncate_to_tokens(text, budget_tokens)
+        return span, True
+
+    lowered = [line.lower() for line in lines]
+    costs = [count_tokens(line) + 1 for line in lines]
+    terms = [t for t in query_terms if t]
+
+    best_start = best_end = 0
+    best_score = -1.0
+    for start in range(len(lines)):
+        cost = 0
+        score = 0.0
+        end = start
+        while end < len(lines):
+            cost += costs[end]
+            if cost > budget_tokens:
+                break
+            score += sum(1 for term in terms if term in lowered[end])
+            end += 1
+        # Strict '>' keeps the earliest window on a tie.
+        if end > start and score > best_score:
+            best_score, best_start, best_end = score, start, end
+
+    if best_end <= best_start:
+        return truncate_to_tokens(text, budget_tokens), True
+
+    span = "\n".join(lines[best_start:best_end]).strip()
+    if not span:
+        return truncate_to_tokens(text, budget_tokens), True
+    # Mark elision explicitly rather than pretending the span is the whole
+    # memory. The marks are conventional truncation indicators, not content.
+    if best_start > 0:
+        span = "…\n" + span
+    if best_end < len(lines):
+        span = span + "\n…"
+    return span, True
+
+
 def assemble(
     settings: Settings,
     store: Store,
     user_id: str,
+    plan: QueryPlan,
     scored: list[Candidate],
     memories: dict[int, MemoryRow],
     *,
@@ -279,24 +294,20 @@ def assemble(
         chunk: ChunkRow | None = (
             chunk_map.get(memory.chunk_id) if memory.chunk_id is not None else None
         )
-        entities = entity_map.get(memory.chunk_id, []) if memory.chunk_id is not None else []
 
-        head = _header(
-            kind=memory.structural_kind,
-            lang=memory.structural_lang,
-            entities=entities,
-            source_ts=memory.ts,
-            superseded=memory.superseded_by is not None,
-        )
-
+        body_source = chunk.text if chunk is not None else memory.text
         full_form = rank < settings.evidence_full_count
-        body_budget = (
+        budget_for_item = (
             settings.evidence_item_tokens if full_form else settings.evidence_ptr_tokens
         )
-        body_room = max(24, body_budget - count_tokens(head))
-        body_source = chunk.text if chunk is not None else memory.text
-        body = truncate_to_tokens(body_source, body_room)
-        content = f"{head}\n---\n{body}".strip()
+
+        # content is a verbatim span of the stored memory. No header, no labels,
+        # no rewriting: the contract states returned content is preserved
+        # verbatim for audit, and the schema's example is plain remembered text.
+        # Identifiers live in the index as retrieval keys, not in the payload,
+        # and the source timestamp belongs in `created_at`, not in the text.
+        content, truncated = _select_span(body_source, budget_for_item, plan.keywords)
+        stamped = _iso_from_ms(memory.ts)
 
         # Repeated text across sessions adds no new evidence but would consume
         # the answer model's context.
@@ -315,8 +326,14 @@ def assemble(
                 memory_id=memory.id,
                 content=content,
                 score=round(cand.final, 6),
-                created_at=memory.created_at,
+                # The contract defines created_at as the memory's source time or
+                # persistence time. We prefer the source timestamp supplied by
+                # the platform; only when the source had none do we fall back to
+                # our own write time, and the two are never conflated.
+                created_at=stamped or memory.created_at,
                 tokens=item_tokens,
+                truncated=truncated,
+                superseded=memory.superseded_by is not None,
             )
         )
 

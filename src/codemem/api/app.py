@@ -224,7 +224,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return SearchResponse(
             data=[
                 SearchItem(
-                    id=f"mem_{item.memory_id}",
+                    # A stable identifier, per the contract. The "superseded"
+                    # marker is carried here rather than in `content`, because
+                    # content must stay verbatim memory text: an identifier is
+                    # metadata, whereas editing the text would break auditability.
+                    id=(
+                        f"mem_{item.memory_id}"
+                        + ("_superseded" if item.superseded else "")
+                    ),
                     content=item.content,
                     score=item.score,
                     created_at=item.created_at,

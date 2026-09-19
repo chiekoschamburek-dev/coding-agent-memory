@@ -14,18 +14,24 @@ Enforcement is structural, not procedural, and is covered by
 `tests/test_traceability.py` — which fails if returned content stops being a
 verbatim span of what was Added:
 
-- **returned content is a verbatim slice of stored memory text.** Truncation to
-  fit the token budget is allowed; paraphrase is not. The contract states that
-  returned content is "preserved verbatim for audit", which is only meaningful if
-  an auditor can locate our output in the input. A compact summary asserting
-  something the trajectory never said would be fabricated evidence rather than a
-  summary of it, and a real session trajectory is usually already more compact
-  than a lossy re-rendering of it;
-- **only a closed header vocabulary may be added around that text**, carrying
-  identifiers extracted by regex from the same stored text, plus the source
-  timestamp echoed from the Add request. `[time]` deliberately shows the
-  platform's timestamp, never our processing time, and is omitted entirely when
-  the source had none;
+- **`data[].content` is a verbatim slice of stored memory text.** Truncation to
+  fit the token budget is selection and is allowed; rewriting is not. The contract
+  states returned content is "preserved verbatim for audit", which is only
+  meaningful if an auditor can locate our output in the input. A compact summary
+  asserting something the trajectory never said would be fabricated evidence
+  rather than a digest of it;
+- **`created_at` carries the platform's source timestamp**, falling back to our
+  persistence time only when the source had none. The two are never conflated: a
+  processing clock is a fact about our pipeline that an auditor cannot find in
+  the input;
+- **no packaging is added to the text** — no ``[field] value`` headers, no
+  separators, no invented timestamps inside ``content``. Identifiers are kept as
+  retrieval keys in the index rather than duplicated into the payload;
+- **the ``superseded`` marker travels on ``id``**, not in the content, because it
+  is our judgement rather than memory text;
+- **no free-form generation anywhere in the Search path**; the only LLM use
+  planned there is *scoring* existing memories, which produces a number and never
+  text returned to the platform;
 - every returned item is a row in `memory`, written during Add;
 - Search's assembly step composes a header from identifiers already extracted at
   Add time plus a verbatim excerpt — it has no code path that produces new

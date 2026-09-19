@@ -71,6 +71,7 @@ class SearchPipeline:
             self.settings,
             self.store,
             user_id,
+            plan,
             reranked,
             memories,
             top_k=limit,
