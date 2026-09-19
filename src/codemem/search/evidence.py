@@ -28,7 +28,13 @@ from ..core.config import Settings
 from ..core.tokens import count_tokens, truncate_to_tokens
 from ..index.store import ChunkRow, MemoryRow, Store
 from .query import QueryPlan
-from .retriever import Candidate
+from .retriever import (
+    COVERAGE_WEIGHT_IN_FINAL,
+    ENTITY_WEIGHT_IN_FINAL,
+    RRF_WEIGHT_IN_FINAL,
+    STRENGTH_WEIGHT_IN_FINAL,
+    Candidate,
+)
 
 # Which structural kinds a question most likely needs, keyed by detected intent.
 INTENT_KIND_BONUS: dict[str, dict[str, float]] = {
@@ -90,6 +96,11 @@ def score_candidates(
     ``entity_match_by_memory`` holds IDF-weighted identifier scores, normalized
     within this query so questions of differing identifier density stay
     comparable.
+
+    The blend includes a *strength* term on purpose. Pure rank fusion discards
+    magnitude, so a memory that wins BM25 by five times looks almost identical
+    to one that barely cleared the match — and a merely-recent, unrelated memory
+    can then displace a decisive match. Restoring magnitude fixes that.
     """
     eligible = [
         c for c in candidates if any(name in c.channels for name in INFORMATIVE_CHANNELS)
@@ -100,6 +111,15 @@ def score_candidates(
     max_rrf = max((c.rrf for c in eligible), default=0.0) or 1.0
     max_entity = max(entity_match_by_memory.values(), default=0.0)
 
+    # Per-channel maxima so each channel's magnitude is normalized within this
+    # query, which makes channels comparable without cross-query calibration.
+    channel_max: dict[str, float] = {}
+    for cand in eligible:
+        for name in INFORMATIVE_CHANNELS:
+            score = cand.channel_scores.get(name)
+            if score is not None:
+                channel_max[name] = max(channel_max.get(name, 0.0), score)
+
     for cand in eligible:
         memory = memories.get(cand.memory_id)
         base = cand.rrf / max_rrf
@@ -109,6 +129,14 @@ def score_candidates(
         coverage = sum(
             1 for name in INFORMATIVE_CHANNELS if name in cand.channels
         ) / len(INFORMATIVE_CHANNELS)
+
+        # Best normalized match strength across the informative channels.
+        strength = 0.0
+        for name in INFORMATIVE_CHANNELS:
+            score = cand.channel_scores.get(name)
+            top = channel_max.get(name, 0.0)
+            if score is not None and top > 0:
+                strength = max(strength, score / top)
 
         # Normalized identifier evidence, damped: one strong match helps, but a
         # memory must not win on identifiers alone, since same-repository
@@ -127,7 +155,13 @@ def score_candidates(
         # later session replaced is still potentially the useful precedent.
         penalty = 0.65 if (memory is not None and memory.superseded_by) else 1.0
 
-        cand.final = (0.45 * base + 0.20 * coverage + 0.35 * entity_signal) * bonus * penalty
+        combined = (
+            RRF_WEIGHT_IN_FINAL * base
+            + COVERAGE_WEIGHT_IN_FINAL * coverage
+            + STRENGTH_WEIGHT_IN_FINAL * strength
+            + ENTITY_WEIGHT_IN_FINAL * entity_signal
+        )
+        cand.final = combined * bonus * penalty
 
     scored = sorted(
         [c for c in eligible if c.final > 0], key=lambda c: (-c.final, c.memory_id)

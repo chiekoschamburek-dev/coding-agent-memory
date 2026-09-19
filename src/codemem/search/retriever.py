@@ -27,11 +27,24 @@ from .query import QueryPlan
 
 log = get_logger("codemem.search.retriever")
 
+# Channel weights for the *rank* fusion. Recency is deliberately near-tie-breaker
+# weight: it carries no semantic signal, so it must not be able to outvote how
+# strongly a memory actually matches. Leaving it at peer weight lets a merely
+# recent memory displace a decisive lexical match, because rank fusion compresses
+# large score gaps into small rank differences.
 CHANNEL_WEIGHTS = {
     "lexical": 1.0,
     "entity": 1.15,  # exact identifiers are the most trustworthy signal
-    "recency": 0.35,
+    "recency": 0.08,
 }
+
+# Relative contribution of the fused rank vs. the raw match strength. Rank fusion
+# discards magnitude, so a memory that wins BM25 by 5x looks almost identical to
+# one that barely matches. The strength term restores that information.
+RRF_WEIGHT_IN_FINAL = 0.40
+COVERAGE_WEIGHT_IN_FINAL = 0.15
+STRENGTH_WEIGHT_IN_FINAL = 0.30
+ENTITY_WEIGHT_IN_FINAL = 0.15
 
 
 @dataclass(slots=True)

@@ -70,15 +70,25 @@ def build_sparse(*texts: str | None) -> str:
 def fts_query_terms(text: str, *, max_terms: int = 24, min_len: int = 2) -> list[str]:
     """Extract literal query terms (plus identifier sub-tokens) for FTS/BM25.
 
-    Terms are OR-combined by the caller; this only decides the vocabulary.
+    Terms are OR-combined by the caller, so **stopwords must be removed here**.
+    Because the match is a disjunction, a single surviving function word makes
+    every memory in the corpus match every question, which silently disables
+    relevance gating downstream. Identifier sub-tokens are kept regardless of
+    the stopword list: a code symbol is never a query shell.
     """
+    from ..core.text import is_stopword
+
     terms: dict[str, None] = {}
     for match in _IDENT_RE.finditer(text or ""):
         token = match.group(0)
-        if len(token) >= min_len:
+        if len(token) >= min_len and not is_stopword(token):
             terms.setdefault(token.lower(), None)
-        for sub in identifier_subtokens(token):
-            terms.setdefault(sub, None)
+        # Sub-tokens are only added when the identifier itself survived; a
+        # stopword like "the" should not smuggle in its own fragments.
+        if not is_stopword(token):
+            for sub in identifier_subtokens(token):
+                if not is_stopword(sub):
+                    terms.setdefault(sub, None)
         if len(terms) >= max_terms:
             return list(terms)
     # Also keep standalone CJK runs and long numbers, which carry real signal

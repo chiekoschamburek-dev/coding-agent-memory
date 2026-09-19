@@ -15,21 +15,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..add.entities import extract_entities
-
-# Interrogative / instruction shells that carry no retrieval signal.
-_STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "if", "then", "than", "that", "this",
-    "these", "those", "is", "are", "was", "were", "be", "been", "being", "do",
-    "does", "did", "doing", "have", "has", "had", "having", "will", "would",
-    "should", "could", "can", "may", "might", "must", "shall", "of", "in", "on",
-    "at", "to", "for", "with", "by", "from", "as", "into", "about", "which",
-    "what", "when", "where", "who", "whom", "whose", "why", "how", "all", "any",
-    "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
-    "not", "only", "own", "same", "so", "too", "very", "just", "now", "also",
-    "best", "matches", "match", "answer", "question", "following", "likely",
-    "most", "least", "correct", "correctly", "based", "according", "given",
-    "does", "please", "select", "choose", "which", "option", "options",
-}
+from ..core.text import STOPWORDS as _STOPWORDS
 
 _OPTION_PREFIX_RE = re.compile(r"^\s*(?:\(?[A-Za-z]\)|[A-Za-z][.):]|\d+[.):])\s*")
 _CODEISH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+")

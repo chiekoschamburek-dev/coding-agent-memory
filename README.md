@@ -112,6 +112,24 @@ Covers the contract (echoed identifiers, always-present `data`, the `top_k`
 ceiling, error envelope), isolation (including the entity and recency channels),
 idempotency, Add degradation, ranking under same-repo noise, and concurrency.
 
+`tests/test_ranking_scale.py` deserves a note: it uses a few hundred
+same-repository distractors, because several real defects were invisible at small
+corpus size and only appeared at realistic scale.
+
+### Diagnostics
+
+`scripts/` holds the measurement tools used to find those defects, kept because
+they are how the tuning decisions were made rather than guessed:
+
+| Script | Answers |
+|---|---|
+| `characterize_gate.py` | which queries the noise gate admits, with one memory |
+| `characterize_gate_corpus.py` | the same, but against hundreds of same-repo distractors, reporting the relevant memory's *rank* |
+| `diagnose_lexical.py` | per-term document frequency and which candidates beat the relevant one |
+| `diagnose_channel_attribution.py` | each channel ablated, to attribute a ranking failure |
+| `probe_provider.py` | whether the LLM endpoint behaves like the required model |
+| `loadtest.py` | latency and correctness under concurrent Add/Search |
+
 ## Documentation
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — data model, retrieval design, and the

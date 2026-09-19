@@ -142,12 +142,27 @@ Reciprocal Rank Fusion (k=60) with per-channel weights. RRF needs no
 cross-channel score calibration, which matters because BM25 and identifier
 weights are on incomparable scales.
 
+Two properties of RRF had to be corrected for, and both were found by measuring
+at realistic corpus size rather than by reasoning:
+
+**Recency must be a near-tie-breaker, not a peer.** RRF compresses magnitude into
+rank distance, so a peer-weighted recency channel contributed more to the fused
+score than a five-fold BM25 win did. With hundreds of newer same-repository
+distractors, the genuinely relevant memory slid from rank 1 to rank 5. Recency's
+weight is therefore 0.08, not 0.35.
+
+**Rank fusion alone loses match strength.** Because RRF discards magnitude, a
+memory that wins BM25 by 5x (13.98 vs 2.77 in a measured case) scored almost the
+same as one that barely cleared the threshold. The final score therefore blends a
+*strength* term — the best per-channel score, normalized per query — alongside
+the fused rank.
+
 ### Scoring
 
-`0.45·RRF + 0.20·coverage + 0.35·identifier`, times an intent/kind bonus and a
-superseded penalty.
+`0.40·RRF + 0.15·coverage + 0.30·strength + 0.15·identifier`, times an
+intent/kind bonus and a superseded penalty.
 
-Two deliberate choices:
+Four deliberate choices:
 
 - **Coverage counts only informative channels.** Recency is excluded. Being new
   is not evidence of relevance, and counting it would let an irrelevant memory
@@ -157,6 +172,10 @@ Two deliberate choices:
   drop anything. Eligibility therefore requires that at least one informative
   channel actually found the memory. Without this, every query returns an
   irrelevant item; with it, an unrelated question correctly returns `[]`.
+- **Stopwords are removed before FTS matching.** FTS terms are OR-combined, so
+  leaving `the`, `of` or `is` in the query makes *every* memory match *every*
+  question. This silently disabled the noise gate: queries like "How do I bake
+  sourdough bread?" returned memories. Verified in `tests/test_ranking_scale.py`.
 - **Damped identifier signal.** Identifier evidence is raised to the 1.5 power
   after normalization, so one strong match helps but a memory cannot win on
   identifiers alone — same-repo distractors share paths too.
