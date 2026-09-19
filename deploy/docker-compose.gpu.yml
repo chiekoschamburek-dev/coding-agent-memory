@@ -1,0 +1,56 @@
+# GPU deployment: same application on a CUDA-enabled image.
+#
+#   docker compose -f deploy/docker-compose.gpu.yml up --build -d
+#
+# Requires the NVIDIA Container Toolkit on the host. Verify before relying on it:
+#   docker run --rm --gpus all codemem:0.1.0-gpu \
+#     python3.12 -c "import torch; print(torch.cuda.is_available())"
+#
+# Why bother: dense retrieval and reranking are ~8x faster on a GPU (embedding
+# 14 -> 112 docs/s, reranking 15.9 -> 2.0 ms/doc). That is what makes dense recall
+# worth its cost — on GPU it improves nDCG@10 and recall@10 over rerank-only,
+# while on CPU it added no measurable gain.
+
+services:
+  codemem:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gpu
+    image: codemem:0.1.0-gpu
+    container_name: codemem
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - codemem-data:/data
+    environment:
+      CODEMEM_API_KEY: "${CODEMEM_API_KEY:-}"
+      CODEMEM_LOG_LEVEL: "${CODEMEM_LOG_LEVEL:-INFO}"
+      CODEMEM_DENSE_ENABLED: "${CODEMEM_DENSE_ENABLED:-true}"
+      CODEMEM_RERANK_ENABLED: "${CODEMEM_RERANK_ENABLED:-true}"
+      # auto resolves to CUDA on this image when the GPU is visible, and falls
+      # back to CPU if it is not — so a missing passthrough degrades rather than
+      # crashing.
+      CODEMEM_EMBED_DEVICE: "${CODEMEM_EMBED_DEVICE:-auto}"
+      CODEMEM_RERANK_DEVICE: "${CODEMEM_RERANK_DEVICE:-auto}"
+      CODEMEM_LLM_ENABLED: "${CODEMEM_LLM_ENABLED:-false}"
+      CODEMEM_LLM_BASE_URL: "${CODEMEM_LLM_BASE_URL:-}"
+      CODEMEM_LLM_API_KEY: "${CODEMEM_LLM_API_KEY:-}"
+      CODEMEM_LLM_MODEL: "${CODEMEM_LLM_MODEL:-gpt-4o-mini}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Model loading happens at startup; allow time before failing health.
+      start_period: 60s
+
+volumes:
+  codemem-data:

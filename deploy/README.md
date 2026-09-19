@@ -68,15 +68,48 @@ for the full evaluation window, which is the risk to weigh.
 
 ## GPU
 
-The P1 baseline is pure CPU. For local embeddings and cross-encoder reranking
-(P2), install the CUDA build of torch in a derived image and run with:
+The default image is CPU-only so it runs anywhere. Dense retrieval and reranking
+work on CPU but are roughly **8× slower** there, measured on the same corpus:
+
+| stage | CPU | GPU (RTX 5060) |
+|---|---|---|
+| embedding, 256 long documents | 14 docs/s | 112 docs/s |
+| reranking, 120-document pool | 15.9 ms/doc | 2.0 ms/doc |
+
+That difference decides whether dense recall is worth its cost: on GPU it improves
+nDCG@10 and recall@10 over rerank-only; on CPU it added no measurable gain. Both
+are contract-compliant — 300 Add requests take ~155 s on GPU and ~850 s on CPU,
+against a 30-minute per-request ceiling — but the ranking is better on GPU.
+
+Build the CUDA image and pass the GPU through:
 
 ```bash
-docker run --gpus all -e CODEMEM_EMBED_DEVICE=cuda ... codemem:0.1.0
+docker build -f deploy/Dockerfile.gpu -t codemem:0.1.0-gpu .
+docker run -d --gpus all -p 8080:8080 -v codemem-data:/data \
+  -e CODEMEM_API_KEY=your-key codemem:0.1.0-gpu
 ```
 
-The CPU path must keep working: it is the fallback if the GPU host is the
-ingress host and something goes wrong.
+Requires the NVIDIA Container Toolkit on the host. Confirm it works:
+
+```bash
+docker run --rm --gpus all codemem:0.1.0-gpu \
+  python3.12 -c "import torch; print(torch.cuda.is_available())"
+```
+
+`CODEMEM_EMBED_DEVICE` and `CODEMEM_RERANK_DEVICE` default to `auto`, which
+selects CUDA when visible and falls back to CPU otherwise — so the GPU image is
+also safe on a host where the GPU was not passed through, and the CPU image never
+attempts to use one.
+
+**Verify what actually loaded.** `GET /health` reports `channels`, including
+whether the embedding and reranker models loaded. Without this, a silent fallback
+to the CPU-only lexical path looks identical to success until the score is worse:
+
+```json
+{"status":"ok", ...,
+ "channels":{"dense_enabled":true,"dense_available":true,
+             "rerank_enabled":true,"rerank_available":true,"llm_enabled":false}}
+```
 
 ## Operational notes
 

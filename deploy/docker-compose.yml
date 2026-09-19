@@ -14,17 +14,34 @@ services:
       # Leave CODEMEM_API_KEY unset for public smoke only; set it for a real run.
       CODEMEM_API_KEY: "${CODEMEM_API_KEY:-}"
       CODEMEM_LOG_LEVEL: "${CODEMEM_LOG_LEVEL:-INFO}"
-      # Enrichment is off in P1; the service is fully functional without an LLM.
+
+      # Optional retrieval channels. Both default to on. On this CPU image the
+      # models load but run ~8x slower than on a GPU; see deploy/Dockerfile.gpu
+      # and the hardware note in deploy/README.md.
+      CODEMEM_DENSE_ENABLED: "${CODEMEM_DENSE_ENABLED:-true}"
+      CODEMEM_RERANK_ENABLED: "${CODEMEM_RERANK_ENABLED:-true}"
+      # auto = CUDA when visible, else CPU. Resolves to CPU on this image.
+      CODEMEM_EMBED_DEVICE: "${CODEMEM_EMBED_DEVICE:-auto}"
+      CODEMEM_RERANK_DEVICE: "${CODEMEM_RERANK_DEVICE:-auto}"
+
+      # Enrichment is not implemented yet; the service is fully functional
+      # without it. These settings currently affect only scripts/probe_provider.py.
       CODEMEM_LLM_ENABLED: "${CODEMEM_LLM_ENABLED:-false}"
       CODEMEM_LLM_BASE_URL: "${CODEMEM_LLM_BASE_URL:-}"
       CODEMEM_LLM_API_KEY: "${CODEMEM_LLM_API_KEY:-}"
       CODEMEM_LLM_MODEL: "${CODEMEM_LLM_MODEL:-gpt-4o-mini}"
+
+      # Answer enrichment budget knobs, if tuning against the benchmark.
+      CODEMEM_MAX_EVIDENCE_PER_SESSION: "${CODEMEM_MAX_EVIDENCE_PER_SESSION:-3}"
+      CODEMEM_MIN_EVIDENCE_SCORE: "${CODEMEM_MIN_EVIDENCE_SCORE:-0.15}"
     healthcheck:
+      # /health reports whether the models actually loaded, so a silent fallback
+      # to the lexical-only path is visible rather than inferred from a score.
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 40s
 
 volumes:
   codemem-data:

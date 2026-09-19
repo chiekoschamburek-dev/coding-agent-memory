@@ -28,11 +28,14 @@ from ..core.logging import get_logger, log_ctx, setup_logging
 from ..core.schemas import (
     AddRequest,
     AddResponse,
+    ChannelStatus,
     HealthResponse,
     SearchItem,
     SearchRequest,
     SearchResponse,
 )
+from ..embed import Instance as EmbedInstance
+from ..rerank import RerankState
 from ..index.store import Store
 from ..add.pipeline import AddPipeline
 from ..search.service import SearchPipeline
@@ -47,8 +50,18 @@ class Container:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.store = Store(settings)
-        self.add = AddPipeline(settings, self.store)
-        self.search = SearchPipeline(settings, self.store)
+        # One shared encoder for Add and Search. It loads lazily, so a missing
+        # or broken model degrades the dense channel instead of failing startup.
+        self.embedder = EmbedInstance.get(settings)
+        # Reranking is also optional: a missing cross-encoder leaves the fused
+        # recall ranking in place.
+        self.reranker = (
+            RerankState.get_state().get(settings) if settings.rerank_enabled else None
+        )
+        self.add = AddPipeline(settings, self.store, embedder=self.embedder)
+        self.search = SearchPipeline(
+            settings, self.store, embedder=self.embedder, reranker=self.reranker
+        )
         self.ready = True
 
     def close(self) -> None:
@@ -125,7 +138,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: Container = app.state.container
         users, memories = container.store.counts()
         return HealthResponse(
-            status="ok", version=__version__, users=users, memories=memories
+            status="ok",
+            version=__version__,
+            users=users,
+            memories=memories,
+            channels=ChannelStatus(
+                dense_enabled=container.settings.dense_enabled,
+                # Reported so a silent fallback to the lexical-only path is
+                # visible in deployment rather than discovered in a low score.
+                dense_available=bool(
+                    container.embedder and container.embedder.available
+                ),
+                rerank_enabled=container.reranker is not None,
+                rerank_available=bool(
+                    container.reranker and container.reranker.available
+                ),
+                llm_enabled=container.settings.llm_enabled,
+            ),
         )
 
     @app.post("/add", response_model=AddResponse)

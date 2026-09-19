@@ -1,0 +1,72 @@
+# GPU image: same application, CUDA-enabled torch.
+#
+# Build this instead of the default Dockerfile when the host has an NVIDIA GPU
+# and you want dense retrieval and reranking to run on it. Measured benefit on an
+# RTX 5060: ~8x on both stages (embedding 14 -> 112 docs/s, reranking 15.9 ->
+# 2.0 ms/doc), which is what makes dense recall worth its cost.
+#
+#   docker build -f deploy/Dockerfile.gpu -t codemem:0.1.0-gpu .
+#   docker run --gpus all -p 8080:8080 -v codemem-data:/data \
+#     -e CODEMEM_API_KEY=... codemem:0.1.0-gpu
+#
+# Requires the NVIDIA Container Toolkit on the host. Verify with
+#   docker run --rm --gpus all codemem:0.1.0-gpu python -c "import torch;print(torch.cuda.is_available())"
+#
+# CODEMEM_EMBED_DEVICE / CODEMEM_RERANK_DEVICE default to "auto", which selects
+# CUDA when visible and falls back to CPU otherwise, so this image is also safe
+# on a machine where the GPU is not passed through.
+
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    CODEMEM_DATA_DIR=/data \
+    CODEMEM_HOST=0.0.0.0 \
+    CODEMEM_PORT=8080
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3.12 python3.12-venv python3-pip curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY src/codemem ./src/codemem
+
+# Install CUDA torch explicitly, then the dense extras without letting pip pull a
+# CPU-only torch over it.
+RUN python3.12 -m pip install --break-system-packages --upgrade pip \
+ && python3.12 -m pip install --break-system-packages \
+      --index-url https://download.pytorch.org/whl/cu128 torch \
+ && python3.12 -m pip install --break-system-packages ".[dense]"
+
+# Pre-download the models so runtime needs no network. A deployment host with no
+# route to huggingface.co otherwise stalls for minutes on load retries, which
+# would block Add.
+ARG CODEMEM_EMBED_MODEL=BAAI/bge-small-en-v1.5
+ARG CODEMEM_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+ENV HF_HOME=/opt/hf
+RUN python3.12 - <<'PY' || echo "model pre-download skipped; dense/rerank will be unavailable"
+import os
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["USE_TF"] = "0"
+from sentence_transformers import SentenceTransformer, CrossEncoder
+SentenceTransformer(os.environ.get("CODEMEM_EMBED_MODEL", "BAAI/bge-small-en-v1.5"))
+CrossEncoder(os.environ.get("CODEMEM_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"))
+print("models cached")
+PY
+
+RUN mkdir -p /data && chmod 777 /data /opt/hf
+
+VOLUME ["/data"]
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+
+# /health reports whether the models actually loaded on this host, so a silent
+# fallback to the lexical-only path is visible rather than inferred from a score.
+CMD ["python3.12", "-m", "codemem"]

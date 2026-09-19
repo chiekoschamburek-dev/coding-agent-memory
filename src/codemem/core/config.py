@@ -110,17 +110,66 @@ class Settings:
     enrich_ratio: float = 0.25  # fraction of chunks eligible for enrichment
 
     # ---- dense retrieval ------------------------------------------------
-    dense_enabled: bool = False
+    # On by default. The cost/benefit was measured on both devices and it flips
+    # with hardware, so the earlier CPU-only "not worth it" conclusion does not
+    # hold on a GPU host:
+    #
+    #   GPU (RTX 5060): dense+rerank beats rerank-only on nDCG@10 (0.6586 vs
+    #     0.6474) and recall@10 (0.7133 vs 0.6914); Add 155 s for 300 requests.
+    #   CPU: the same configuration added ~no metric gain for ~5x the Add cost.
+    #
+    # Because device defaults to "auto", a GPU host gets the better ranking and
+    # a CPU-only host still fits comfortably inside the 30-minute Add budget.
+    # See eval/README.md: the proxy's file-overlap ground truth cannot credit a
+    # session that helps semantically without sharing files, so dense's real
+    # advantage is understated here.
+    dense_enabled: bool = True
     embed_backend: str = "local"  # local | openai | none
-    embed_model: str = "BAAI/bge-m3"
-    embed_dim: int = 1024
-    embed_device: str = "cpu"
+    embed_model: str = "BAAI/bge-small-en-v1.5"
+    embed_dim: int = 384
+    # "auto" picks CUDA when available and falls back to CPU, so the same image
+    # is fast on a GPU host and correct on a CPU one. Measured on a Blackwell
+    # laptop GPU: embedding 14 -> 112 docs/s and reranking 15.9 -> 2.0 ms/doc,
+    # which is the difference between dense Add taking ~850 s and ~110 s.
+    embed_device: str = "auto"
     embed_batch_size: int = 16
+    # Load the encoder from the local cache only. Default true because a
+    # deployment host may have no route to huggingface.co, where model loading
+    # otherwise stalls for minutes on retries. Set false only when the model
+    # still needs downloading, then pre-bake it (see Dockerfile).
+    embed_offline: bool = True
+    # Similarity floor. In a same-repository corpus every neighbour is somewhat
+    # similar, so without a floor the dense channel injects uninformative
+    # candidates into every query.
+    dense_min_similarity: float = 0.30
+    # Cap on how many memories get embedded per Add call, to bound Add latency
+    # on very large trajectories.
+    dense_max_per_add: int = 400
 
     # ---- rerank ---------------------------------------------------------
-    rerank_enabled: bool = False
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # On by default: it is the single largest measured gain (MRR +0.093,
+    # nDCG@10 +0.067) and costs Add nothing, since it runs only at search time.
+    # When the model is unavailable the stage is skipped and the fused recall
+    # ranking is used unchanged.
+    rerank_enabled: bool = True
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_device: str = "auto"
+    # How many fused candidates to send through the cross-encoder. It is
+    # O(pool) forward passes, so this is the latency knob.
     rerank_top_n: int = 120
+    # Blend: final = (1-w) * fused + w * rerank. Reranking is accurate but its
+    # scores are on a different scale than rank fusion, so it is blended rather
+    # than allowed to fully replace the recall ordering.
+    # Swept on the proxy benchmark: 0.65 peaks (MRR 0.818, nDCG@10 0.681,
+    # recall@10 0.705); 0.85 degrades, 0.45 is measurably worse.
+    rerank_weight: float = 0.65
+    # Temperature for converting cross-encoder logits into a 0..1 score. Fixed
+    # rather than derived from the reranked set, so the same logit always maps to
+    # the same contribution and results do not depend on the pool size.
+    rerank_temperature: float = 2.0
+    # Cross-encoder context cap. Memory chunks can be long; truncating keeps
+    # per-pair cost bounded.
+    rerank_max_chars: int = 2000
 
     @property
     def db_path(self) -> Path:
@@ -168,10 +217,23 @@ class Settings:
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))
         put("llm_model", _env_str("CODEMEM_LLM_MODEL", "gpt-4o-mini"))
         put("enrich_ratio", _env_float("CODEMEM_ENRICH_RATIO", 0.25))
-        put("dense_enabled", _env_bool("CODEMEM_DENSE_ENABLED", False))
+        put("dense_enabled", _env_bool("CODEMEM_DENSE_ENABLED", True))
         put("embed_backend", _env_str("CODEMEM_EMBED_BACKEND", "local"))
-        put("embed_model", _env_str("CODEMEM_EMBED_MODEL", "BAAI/bge-m3"))
-        put("embed_device", _env_str("CODEMEM_EMBED_DEVICE", "cpu"))
-        put("rerank_enabled", _env_bool("CODEMEM_RERANK_ENABLED", False))
-        put("rerank_model", _env_str("CODEMEM_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"))
+        put("embed_model", _env_str("CODEMEM_EMBED_MODEL", "BAAI/bge-small-en-v1.5"))
+        put("embed_device", _env_str("CODEMEM_EMBED_DEVICE", "auto"))
+        put("embed_offline", _env_bool("CODEMEM_EMBED_OFFLINE", True))
+        put(
+            "dense_min_similarity",
+            _env_float("CODEMEM_DENSE_MIN_SIMILARITY", 0.30),
+        )
+        put("dense_max_per_add", _env_int("CODEMEM_DENSE_MAX_PER_ADD", 400))
+        put("rerank_enabled", _env_bool("CODEMEM_RERANK_ENABLED", True))
+        put(
+            "rerank_model",
+            _env_str("CODEMEM_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        )
+        put("rerank_device", _env_str("CODEMEM_RERANK_DEVICE", "auto"))
+        put("rerank_top_n", _env_int("CODEMEM_RERANK_TOP_N", 120))
+        put("rerank_weight", _env_float("CODEMEM_RERANK_WEIGHT", 0.65))
+        put("rerank_temperature", _env_float("CODEMEM_RERANK_TEMPERATURE", 2.0))
         return cls(**kwargs)

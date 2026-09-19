@@ -37,9 +37,10 @@ class AddPlan:
 
 
 class AddPipeline:
-    def __init__(self, settings: Settings, store: Store) -> None:
+    def __init__(self, settings: Settings, store: Store, embedder=None) -> None:
         self.settings = settings
         self.store = store
+        self.embedder = embedder
 
     # ------------------------------------------------------------ public --
 
@@ -79,10 +80,46 @@ class AddPipeline:
             t0=t0,
         )
 
+        # Embedding happens after the transaction commits, so the contract
+        # response never depends on the encoder being available. A failure here
+        # only means this memory is not dense-retrievable; the lexical and
+        # identifier channels still reach it.
+        if not outcome.duplicate:
+            self._embed(user_id, request_id, plan, t0)
+
         degraded = True
         if self.settings.llm_enabled:
             degraded = not self._enrich(user_id, session_id, plan, t0)
         return outcome, degraded
+
+    def _embed(
+        self, user_id: str, request_id: str, plan: AddPlan, t0: float
+    ) -> None:
+        """Embed this request's memories, if the dense channel is enabled."""
+        instance = self.embedder
+        if instance is None or not instance.available:
+            return
+        try:
+            with self.store._read() as conn:  # noqa: SLF001 - same package
+                rows = conn.execute(
+                    "SELECT id, text FROM memory WHERE user_id = ? AND request_id = ?"
+                    " ORDER BY ord",
+                    (user_id, request_id),
+                ).fetchall()
+            rows = rows[: self.settings.dense_max_per_add]
+            if not rows:
+                return
+            vectors = instance.embed([row["text"] for row in rows])
+            if not vectors:
+                return
+            self.store.store_vectors(
+                user_id, [(int(r["id"]), v) for r, v in zip(rows, vectors)]
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "embedding skipped",
+                extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
 
     # ------------------------------------------------------------ planning --
 

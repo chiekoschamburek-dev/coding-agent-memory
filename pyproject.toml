@@ -16,7 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "httpx>=0.27"]
-dense = ["numpy>=1.26", "faiss-cpu>=1.8", "sentence-transformers>=2.7"]
+# Optional dense retrieval and cross-encoder reranking. The service runs fully
+# without these: the lexical and identifier channels are deterministic and
+# model-free. Install with:  pip install -e ".[dense]"
+dense = ["numpy>=1.26", "sentence-transformers>=2.7"]
 llm = ["openai>=1.30"]
 
 [tool.setuptools.packages.find]

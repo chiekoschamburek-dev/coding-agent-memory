@@ -125,16 +125,51 @@ disguising an answer as memory, which the rules forbid.
 
 ### Recall
 
-Three channels, chosen because their failure modes differ:
+Four channels, chosen because their failure modes differ:
 
 | Channel | Signal | Fails when |
 |---|---|---|
 | `lexical` | FTS5 BM25 over text plus identifier sub-tokens | wording differs |
 | `entity` | exact identifier equality, IDF-weighted | identifiers absent |
+| `dense` | embedding similarity over stored vectors | — (optional, off by default) |
 | `recency` | age decay over recent memories | query is time-independent |
 
 A `sparse` column carries identifier sub-tokens (`read_token` ⇄ `readToken` ⇄
 `read`), because the `unicode61` tokenizer keeps camel and snake case whole.
+
+**Dense recall is off by default, on measurement.** With reranking enabled it
+added no metric gain while making Add ~26× slower; it does help when reranking is
+unavailable. See `eval/README.md` for the full ablation and the caveat that the
+proxy's ground truth cannot credit the exact case dense is best at.
+
+### Reranking
+
+A cross-encoder scores each (question, memory) pair *jointly*, which is what lets
+it separate the two cases the recall channels cannot:
+
+```
+"IndexError in tokenizer.py, guarded the empty buffer"  -> relevant
+"reformatted tokenizer.py for the linter"               -> not relevant
+```
+
+Both share every identifier, so BM25 and embeddings see them as near-identical;
+only joint reading distinguishes them. This is the largest measured gain of any
+stage and it runs only at search time, so It costs Add nothing and is enabled by
+default.
+
+Two implementation details were forced by measurement:
+
+- **Documents are clipped by tokenizer, in one batch.** Characters are a poor
+  cost proxy: 2048 characters can be 630 tokens while 40 characters is 21, and
+  latency scales with real tokens (4 ms/doc at 21, 48 ms/doc at 1034). Token
+  clipping took long-memory reranking from 48 to ~14 ms/doc, and calling the
+  tokenizer once for the whole pool rather than once per document took a
+  120-document pool from 6.0 s to 2.1 s.
+- **Scores use a fixed temperature, never max-normalisation.** Normalising by the
+  head's maximum made each memory's contribution depend on which other memories
+  happened to be reranked, so results changed with pool size. The measured
+  sequence was incoherent (MRR 0.818 → 0.772 → 0.684 as the pool grew); with a
+  fixed temperature it is monotone (0.684 → 0.746 → 0.772).
 
 ### Fusion
 

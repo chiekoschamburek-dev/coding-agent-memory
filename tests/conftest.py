@@ -19,7 +19,19 @@ def _quiet_logs() -> None:
 
 @pytest.fixture()
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data")
+    """Settings for the hermetic test suite.
+
+    The optional channels are disabled here even though ``rerank_enabled``
+    defaults to True in production: loading a real model per test would make the
+    suite slow and dependent on the local cache. The default values themselves
+    are asserted separately in ``test_dense.py`` and ``test_rerank.py``, and the
+    rerank path is exercised with a stub model there.
+    """
+    return Settings(
+        data_dir=tmp_path / "data",
+        dense_enabled=False,
+        rerank_enabled=False,
+    )
 
 
 @pytest.fixture()
@@ -31,7 +43,12 @@ def client(settings: Settings):
 
 @pytest.fixture()
 def auth_settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", api_key="sekret-key")
+    return Settings(
+        data_dir=tmp_path / "data",
+        api_key="sekret-key",
+        dense_enabled=False,
+        rerank_enabled=False,
+    )
 
 
 @pytest.fixture()

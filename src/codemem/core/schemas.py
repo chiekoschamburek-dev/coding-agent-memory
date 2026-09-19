@@ -115,8 +115,24 @@ class SearchResponse(BaseModel):
     data: list[SearchItem]
 
 
+class ChannelStatus(BaseModel):
+    """Which retrieval components are actually live.
+
+    Exposed because the optional channels degrade silently by design: if the
+    embedding or reranker model is absent on a deployment host, search still
+    works but ranks worse. Without this, that degradation would be invisible.
+    """
+
+    dense_enabled: bool
+    dense_available: bool
+    rerank_enabled: bool
+    rerank_available: bool
+    llm_enabled: bool
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str
     users: int
     memories: int
+    channels: ChannelStatus | None = None

@@ -104,6 +104,9 @@ cp .env.example .env    # then edit; never commit this file
 | `CODEMEM_LLM_BASE_URL` | unset | OpenAI-compatible endpoint |
 | `CODEMEM_LLM_API_KEY` | unset | prefer runtime injection over a committed file |
 | `CODEMEM_LLM_MODEL` | `gpt-4o-mini` | fixed by the rules for open-source entries |
+| `CODEMEM_DENSE_ENABLED` | `true` | embedding recall; see the hardware note below |
+| `CODEMEM_RERANK_ENABLED` | `true` | cross-encoder reranking; the largest measured gain |
+| `CODEMEM_EMBED_DEVICE` / `CODEMEM_RERANK_DEVICE` | `auto` | CUDA when visible, else CPU (~8× difference) |
 | `CODEMEM_MAX_EVIDENCE_PER_SESSION` | `3` | session diversity cap; see `eval/README.md` |
 | `CODEMEM_MIN_EVIDENCE_SCORE` | `0.15` | noise gate; calibrate with `eval/` |
 | `CODEMEM_EVIDENCE_BUDGET_TOKENS` | `60000` | total payload budget, well under the 117,760 input window |
@@ -161,7 +164,20 @@ the benchmark cannot tell us.
 - [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) — mapping to the rules and the
   eight-item pre-Full checklist.
 - [`deploy/README.md`](deploy/README.md) — public ingress options, since the
-  platform requires a self-hosted publicly reachable API.
+  platform requires a self-hosted publicly reachable API, plus the GPU image.
+
+### A note on the optional channels
+
+Dense retrieval and cross-encoder reranking run on CPU or GPU, but roughly 8x
+faster on GPU, and that difference decides whether dense recall is worth its
+cost: on GPU it improves nDCG@10 (0.659 vs 0.647) and recall@10 (0.713 vs 0.691)
+over rerank-only; on CPU it added no measurable gain.
+
+Both configurations satisfy the contract either way — 300 Add requests take
+~155 s on GPU versus ~850 s on CPU, against a 30-minute per-request ceiling.
+Devices default to `auto`, so each host gets the appropriate behaviour. `GET
+/health` reports what actually loaded, so a silent fallback is visible rather
+than inferred from a lower score.
 
 ## Attribution
 

@@ -29,6 +29,8 @@ from typing import Any, Iterable, Iterator, Sequence
 
 from ..core.config import Settings
 from ..core.logging import get_logger
+from ..embed import pack as _pack
+from ..embed import unpack as _unpack
 from .schema import DDL
 from .sparse import build_sparse
 
@@ -665,6 +667,75 @@ class Store:
         return int(row["m"] or 0)
 
     # ----------------------------------------------------------- delete --
+
+    def store_vectors(
+        self, user_id: str, items: Sequence[tuple[int, Sequence[float]]]
+    ) -> int:
+        """Persist embeddings for memories, keyed by user.
+
+        ``INSERT OR REPLACE`` keeps re-embedding idempotent, which matters
+        because enrichment may be retried.
+        """
+        if not items:
+            return 0
+        written = 0
+        with self._write() as conn:
+            for memory_id, vector in items:
+                if not vector:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_vector(memory_id, user_id, dim, vec)"
+                    " VALUES (?,?,?,?)",
+                    (memory_id, user_id, len(vector), _pack(vector)),
+                )
+                written += 1
+        return written
+
+    def dense_search(
+        self, user_id: str, query_vector: Sequence[float], limit: int
+    ) -> list[tuple[int, float]]:
+        """Exact nearest neighbours within one user, by cosine similarity.
+
+        Brute force over a user's own vectors on purpose: the platform's top_k is
+        100 and a single user's corpus is bounded by its trajectories, so an
+        approximate index would trade correctness for a speedup we do not need —
+        and every ANN structure would add a second place where isolation could be
+        got wrong. Reads only this user's rows.
+        """
+        if not query_vector:
+            return []
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT memory_id, vec FROM memory_vector WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        if not rows:
+            return []
+
+        q = list(query_vector)
+        scored: list[tuple[int, float]] = []
+        for row in rows:
+            vec = _unpack(row["vec"])
+            if len(vec) != len(q):
+                continue  # dimension drift from a changed encoder; skip
+            # Vectors are stored normalized, so the dot product is cosine.
+            score = 0.0
+            for a, b in zip(q, vec):
+                score += a * b
+            scored.append((int(row["memory_id"]), score))
+        scored.sort(key=lambda kv: -kv[1])
+        return scored[:limit]
+
+    def vector_coverage(self, user_id: str) -> tuple[int, int]:
+        """(embedded, total) memories for a user, to detect a stale index."""
+        with self._read() as conn:
+            total = conn.execute(
+                "SELECT count(*) c FROM memory WHERE user_id = ?", (user_id,)
+            ).fetchone()["c"]
+            embedded = conn.execute(
+                "SELECT count(*) c FROM memory_vector WHERE user_id = ?", (user_id,)
+            ).fetchone()["c"]
+        return int(embedded), int(total)
 
     def mark_superseded(self, user_id: str, old_memory_id: int, new_memory_id: int, reason: str) -> None:
         """Record that a newer memory supersedes an older one.

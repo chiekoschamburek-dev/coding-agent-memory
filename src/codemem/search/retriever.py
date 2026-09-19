@@ -32,9 +32,15 @@ log = get_logger("codemem.search.retriever")
 # strongly a memory actually matches. Leaving it at peer weight lets a merely
 # recent memory displace a decisive lexical match, because rank fusion compresses
 # large score gaps into small rank differences.
+#
+# ``dense`` sits below lexical and entity on purpose. In the Coding track every
+# candidate comes from the same repository, so embedding similarity is uniformly
+# high and comparatively uninformative; the dense channel exists to catch
+# paraphrase that shares no identifiers, not to lead the ranking.
 CHANNEL_WEIGHTS = {
     "lexical": 1.0,
     "entity": 1.15,  # exact identifiers are the most trustworthy signal
+    "dense": 0.70,
     "recency": 0.08,
 }
 
@@ -62,9 +68,10 @@ class Candidate:
 
 
 class Retriever:
-    def __init__(self, settings: Settings, store: Store) -> None:
+    def __init__(self, settings: Settings, store: Store, embedder=None) -> None:
         self.settings = settings
         self.store = store
+        self.embedder = embedder
 
     def recall(self, user_id: str, plan: QueryPlan) -> list[Candidate]:
         t0 = time.monotonic()
@@ -97,7 +104,15 @@ class Retriever:
         entity_ranked = self.store.entity_search(user_id, plan.entities, per_channel)
         merge("entity", entity_ranked)
 
-        # Channel 3: recency. Cheap, query-independent prior; only applied when
+        # Channel 3: dense similarity. Catches paraphrase that shares no
+        # literal identifier with the question. The query is embedded here, but
+        # memory vectors were embedded during Add, so nothing is generated at
+        # search time.
+        dense_ranked = self._dense_recall(user_id, plan, per_channel)
+        if dense_ranked:
+            merge("dense", dense_ranked)
+
+        # Channel 4: recency. Cheap, query-independent prior; only applied when
         # we actually have timestamps to compare.
         newest = self.store.max_ts(user_id)
         if newest > 0:
@@ -126,6 +141,35 @@ class Retriever:
             },
         )
         return ordered
+
+    def _dense_recall(
+        self, user_id: str, plan: QueryPlan, limit: int
+    ) -> list[tuple[int, float]]:
+        """Nearest memories by embedding similarity, within one user.
+
+        Returns empty when the dense channel is disabled or the encoder is
+        unavailable, so the system degrades to its lexical channels rather than
+        failing. A similarity floor avoids injecting low-confidence neighbours,
+        which in a same-repository corpus are plentiful and uninformative.
+        """
+        instance = self.embedder
+        if instance is None or not instance.available:
+            return []
+        # The question plus each probe: the raw question alone can be short and
+        # vague, while option-derived probes widen the topic space.
+        targets = [plan.query] + [p for p in plan.probes if p != plan.query][:3]
+        vectors = instance.embed(targets)
+        if not vectors:
+            return []
+
+        best: dict[int, float] = {}
+        for vector in vectors:
+            for memory_id, score in self.store.dense_search(user_id, vector, limit):
+                if score < self.settings.dense_min_similarity:
+                    continue
+                if score > best.get(memory_id, float("-inf")):
+                    best[memory_id] = score
+        return sorted(best.items(), key=lambda kv: -kv[1])[:limit]
 
     def _recency_ranking(
         self, user_id: str, newest: int, limit: int

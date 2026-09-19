@@ -25,10 +25,31 @@ RUN apt-get update \
 COPY pyproject.toml README.md ./
 COPY src/codemem ./src/codemem
 RUN pip install --upgrade pip \
- && pip install .
+ && pip install ".[dense]"
+
+# Pre-download the optional models at build time.
+#
+# This must happen during the build, not at first request: model loading does a
+# network check against huggingface.co, and a deployment host that cannot reach
+# it stalls for minutes on retries, which would block Add and blow the contract's
+# latency budget. Baking the weights in also means runtime works offline.
+# Failures are non-fatal: without the models the service still runs on its
+# deterministic lexical and identifier channels.
+ARG CODEMEM_EMBED_MODEL=BAAI/bge-small-en-v1.5
+ARG CODEMEM_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+ENV HF_HOME=/opt/hf
+RUN python - <<'PY' || echo "model pre-download skipped; dense/rerank will be unavailable"
+import os
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["USE_TF"] = "0"
+from sentence_transformers import SentenceTransformer, CrossEncoder
+SentenceTransformer(os.environ.get("CODEMEM_EMBED_MODEL", "BAAI/bge-small-en-v1.5"))
+CrossEncoder(os.environ.get("CODEMEM_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"))
+print("models cached")
+PY
 
 RUN mkdir -p /data && useradd --create-home --uid 10001 codemem \
- && chown -R codemem:codemem /app /data
+ && chown -R codemem:codemem /app /data /opt/hf
 USER codemem
 
 VOLUME ["/data"]
