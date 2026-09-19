@@ -1,0 +1,25 @@
+# Caddy configuration for option A (cloud VM + domain + automatic HTTPS).
+# Caddy obtains and renews Let's Encrypt certificates automatically.
+#
+# Replace your-domain.example with the real domain, then run Caddy on the same
+# Docker network as the codemem service.
+
+your-domain.example {
+	encode zstd gzip
+
+	# Add is synchronous and may take minutes; do not let the proxy cut it short
+	# before the contract's 30-minute ceiling.
+	reverse_proxy codemem:8080 {
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+
+	log {
+		output file /var/log/caddy/codemem.log
+		# Request bodies are never logged: evaluation data must not be retained
+		# beyond what is needed to serve the task.
+		format json
+	}
+}

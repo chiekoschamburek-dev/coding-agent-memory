@@ -1,0 +1,30 @@
+services:
+  codemem:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codemem:0.1.0
+    container_name: codemem
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - codemem-data:/data
+    environment:
+      # Leave CODEMEM_API_KEY unset for public smoke only; set it for a real run.
+      CODEMEM_API_KEY: "${CODEMEM_API_KEY:-}"
+      CODEMEM_LOG_LEVEL: "${CODEMEM_LOG_LEVEL:-INFO}"
+      # Enrichment is off in P1; the service is fully functional without an LLM.
+      CODEMEM_LLM_ENABLED: "${CODEMEM_LLM_ENABLED:-false}"
+      CODEMEM_LLM_BASE_URL: "${CODEMEM_LLM_BASE_URL:-}"
+      CODEMEM_LLM_API_KEY: "${CODEMEM_LLM_API_KEY:-}"
+      CODEMEM_LLM_MODEL: "${CODEMEM_LLM_MODEL:-gpt-4o-mini}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  codemem-data:
