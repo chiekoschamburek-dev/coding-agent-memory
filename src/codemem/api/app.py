@@ -37,6 +37,7 @@ from ..core.schemas import (
 from ..embed import Instance as EmbedInstance
 from ..rerank import RerankState
 from ..index.store import Store
+from ..listwise import ListwiseReranker
 from ..add.pipeline import AddPipeline
 from ..search.service import SearchPipeline
 from .security import require_auth
@@ -58,9 +59,28 @@ class Container:
         self.reranker = (
             RerankState.get_state().get(settings) if settings.rerank_enabled else None
         )
+        # Listwise reranking is an optional final stage; it needs the LLM
+        # endpoint, so it only exists when both the feature and the credentials
+        # are configured.
+        self.listwise = (
+            ListwiseReranker(
+                model=settings.llm_model,
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+                timeout=settings.llm_timeout_seconds,
+                max_candidates=settings.listwise_max_candidates,
+                excerpt_chars=settings.listwise_excerpt_chars,
+            )
+            if settings.listwise_enabled
+            else None
+        )
         self.add = AddPipeline(settings, self.store, embedder=self.embedder)
         self.search = SearchPipeline(
-            settings, self.store, embedder=self.embedder, reranker=self.reranker
+            settings,
+            self.store,
+            embedder=self.embedder,
+            reranker=self.reranker,
+            listwise=self.listwise,
         )
         self.ready = True
 

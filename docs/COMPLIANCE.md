@@ -45,9 +45,11 @@ verbatim span of what was Added:
 - `tests/test_governance.py` asserts returned content is traceable to stored
   text, that no option label is echoed, and that no answer framing appears.
 
-The one place an LLM is permitted in the Search path (planned for P3) is
-*scoring* existing memories — a relevance judgement over already-stored content,
-which produces a number, never text returned to the platform.
+The one place an LLM appears in the Search path is *scoring* existing memories
+(`codemem.listwise`): a relevance judgement over already-stored content which
+produces numbers, never text returned to the platform. It is implemented and off
+by default. `tests/test_listwise.py` asserts that even a reply containing prose
+contributes scores only, and that a malformed reply leaves the ranking unchanged.
 
 ### 2. Sample isolation
 

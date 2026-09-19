@@ -99,44 +99,73 @@ class Probe:
             )
 
     def check_tokenizer_fingerprint(self):
-        """Accuracy on exact token counting distinguishes tokenizer families.
+        """Fingerprint the backend tokenizer through API usage accounting.
 
-        Different model families use different tokenizers, so asking for exact
-        token counts of a fixed string is a cheap fingerprint. The expected
-        values below are for gpt-4o-mini's o200k_base encoder.
+        An earlier version asked the model to *report* token counts, which tests
+        nothing: models cannot reliably introspect their own tokenizer, so even
+        the genuine model fails (observed on a relay that does appear to be the
+        real thing). Prompt tokens in ``usage`` are computed by the backend
+        tokenizer, so differencing two prompts through the API reveals the real
+        per-string count.
+
+        Reference counts for the probe strings (verified with tiktoken):
+          o200k_base  (gpt-4o family): 2, 6, 51, 3
+          cl100k_base (gpt-3.5/4):     2, 6, 51, 6
+          p50k_base   (older):         2, 5, 51, 9
+        The CJK probe is the decisive one: 3 means o200k, 6 means cl100k.
         """
         probes = {
-            "hello world": 2,
-            "antidisestablishmentarianism": 4,
+            " hello world": 2,
+            " antidisestablishmentarianism": 6,
+            " " + "x " * 50: 51,
         }
+        cjk_probe = " 你好世界"
+        cjk_expected_o200k = 3
+        cjk_expected_cl100k = 6
+
         try:
             client = self._client()
-            for text, expected in probes.items():
+
+            def prompt_tokens(suffix: str) -> int:
                 resp = client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {
-                            "role": "user",
-                            "content": (
-                                "How many tokens does this exact string use in your "
-                                f"tokenizer? Reply with only the integer.\n\n{text}"
-                            ),
-                        }
+                        {"role": "user", "content": "Repeat back nothing." + suffix}
                     ],
-                    max_tokens=6,
+                    max_tokens=1,
                     temperature=0,
                 )
-                answer = (resp.choices[0].message.content or "").strip()
-                match = re.search(r"\d+", answer)
-                got = int(match.group(0)) if match else None
+                return int(resp.usage.prompt_tokens)
+
+            baseline = prompt_tokens("")
+            counts = {}
+            for text, expected in probes.items():
+                counts[text] = prompt_tokens(text) - baseline
                 self.checks.append(
                     Check(
-                        f"token_count[{text[:20]}]",
-                        f"expected {expected} for o200k_base",
-                        (got == expected) if got is not None else None,
-                        f"got {got}",
+                        f"tokenizer[{text.strip()[:16] or 'probe'}]",
+                        f"backend tokenizer count; o200k_base expects {expected}",
+                        counts[text] == expected,
+                        f"got {counts[text]}",
                     )
                 )
+
+            cjk = prompt_tokens(cjk_probe) - baseline
+            if cjk == cjk_expected_o200k:
+                verdict, passed = (
+                    f"{cjk} -> consistent with o200k_base (gpt-4o family)", True
+                )
+            elif cjk == cjk_expected_cl100k:
+                verdict, passed = (
+                    f"{cjk} -> consistent with cl100k_base (gpt-3.5/4 family), "
+                    "NOT gpt-4o-mini",
+                    False,
+                )
+            else:
+                verdict, passed = f"{cjk} -> matches no known encoder", None
+            self.checks.append(
+                Check("tokenizer_family[cjk]", "decisive discriminator", passed, verdict)
+            )
         except Exception as exc:
             self.checks.append(
                 Check("tokenizer_fingerprint", "request failed", None, str(exc)[:200])

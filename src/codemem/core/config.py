@@ -101,6 +101,31 @@ class Settings:
     recall_per_channel: int = 120
     candidate_pool: int = 300
 
+    # ---- listwise reranking (LLM) ----------------------------------------
+    # Final ranking stage: judges candidates *comparatively*, which a
+    # cross-encoder cannot do because it scores each pair independently. Costs
+    # one request per search, so it runs only when explicitly enabled; when the
+    # endpoint is missing or the response is malformed, the fused ranking stands.
+    # OFF by default, on measurement. On the proxy benchmark every setting
+    # scored below the configuration without it (MRR 0.780 -> 0.766, recall@10
+    # 0.719 -> 0.675) for ~5x the search latency. Attenuating the weight moves
+    # the numbers monotonically back toward the baseline, which is the signature
+    # of a stage adding noise rather than signal -- if it carried signal there
+    # would be a weight at which it beat the baseline, and there is none.
+    #
+    # Kept implemented and switchable because the proxy measures the wrong thing
+    # here: its ground truth is file overlap, while a judge scores usefulness.
+    # A case inspected by hand showed the judge calling boilerplate useless
+    # (correctly) while our recall supplied no relevant memory at all, so the
+    # proxy penalises the judge for disagreeing with it. "Unproven here", not
+    # "proven useless".
+    listwise_enabled: bool = False
+    listwise_weight: float = 0.5
+    listwise_max_candidates: int = 40
+    # 1800 measured better than 700 (recall@10 0.692 vs 0.675): our retrieval
+    # unit is a whole chunk, and truncating it removes the deciding text.
+    listwise_excerpt_chars: int = 1800
+
     # ---- llm (enrichment / query understanding; Add+Search share it) ----
     llm_enabled: bool = False
     llm_base_url: str | None = None
@@ -212,6 +237,16 @@ class Settings:
         put("rrf_k", _env_int("CODEMEM_RRF_K", 60))
         put("recall_per_channel", _env_int("CODEMEM_RECALL_PER_CHANNEL", 120))
         put("candidate_pool", _env_int("CODEMEM_CANDIDATE_POOL", 300))
+        put("listwise_enabled", _env_bool("CODEMEM_LISTWISE_ENABLED", False))
+        put("listwise_weight", _env_float("CODEMEM_LISTWISE_WEIGHT", 0.5))
+        put(
+            "listwise_max_candidates",
+            _env_int("CODEMEM_LISTWISE_MAX_CANDIDATES", 40),
+        )
+        put(
+            "listwise_excerpt_chars",
+            _env_int("CODEMEM_LISTWISE_EXCERPT_CHARS", 1800),
+        )
         put("llm_enabled", _env_bool("CODEMEM_LLM_ENABLED", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))

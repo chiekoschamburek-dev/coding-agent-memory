@@ -171,6 +171,33 @@ Two implementation details were forced by measurement:
   sequence was incoherent (MRR 0.818 → 0.772 → 0.684 as the pool grew); with a
   fixed temperature it is monotone (0.684 → 0.746 → 0.772).
 
+### Listwise reranking (optional, off by default)
+
+A final stage where an LLM reads the candidate list together and scores it. Its
+advantage over the cross-encoder is *comparative* judgement: a per-pair scorer
+cannot see that forty candidates all come from the same repository, so it cannot
+know that "this one is the explanation" is the discriminating fact.
+
+**Generation boundary.** This stage returns numbers only. The model is asked for
+a JSON array of relevance integers, which is parsed into floats and blended into
+the existing score. No model output reaches ``data[].content``, which remains a
+verbatim span of stored memory text. Scoring existing memories is not generation,
+so rule 1 is respected; ``tests/test_listwise.py`` asserts that even a reply
+containing prose contributes scores and never text.
+
+**Robustness.** A missing endpoint, an HTTP failure, an unparseable reply, or a
+wrong-length array leaves the previous ranking untouched. A partial answer is
+discarded outright rather than padded, because mixing judged and invented scores
+would corrupt the ranking invisibly. Candidates beyond the judged head keep a
+neutral score rather than being treated as irrelevant.
+
+**Why it is off.** On the proxy benchmark it lost at every setting while costing
+~5x search latency, and attenuating its weight drifted results monotonically back
+to the baseline — the signature of noise rather than signal. The caveat is that
+the proxy's ground truth (file overlap) measures something different from what a
+judge optimises (usefulness), so the stage is unproven here rather than refuted.
+See ``eval/README.md`` for the numbers and the hand-inspected counterexample.
+
 ### Fusion
 
 Reciprocal Rank Fusion (k=60) with per-channel weights. RRF needs no

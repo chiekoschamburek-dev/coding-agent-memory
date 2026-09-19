@@ -22,12 +22,18 @@ log = get_logger("codemem.search")
 
 class SearchPipeline:
     def __init__(
-        self, settings: Settings, store: Store, embedder=None, reranker=None
+        self,
+        settings: Settings,
+        store: Store,
+        embedder=None,
+        reranker=None,
+        listwise=None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.retriever = Retriever(settings, store, embedder=embedder)
         self.reranker = reranker
+        self.listwise = listwise
 
     def handle(
         self, *, user_id: str, query: str, options: list[str] | None, top_k: int
@@ -66,6 +72,13 @@ class SearchPipeline:
         # O(pool) forward passes and the tail could not reach the answer model
         # anyway.
         reranked = self._rerank(user_id, plan, scored, memories)
+
+        # Final stage: an LLM judges the head of the list comparatively. A
+        # cross-encoder scores each pair in isolation, so it cannot tell that
+        # forty candidates all come from the same repository and only one
+        # explains the failure; a listwise read can. Scores only -- no model
+        # text is ever returned (see the module docstring).
+        reranked = self._listwise_rerank(plan, reranked, memories)
 
         items = assemble(
             self.settings,
@@ -145,4 +158,54 @@ class SearchPipeline:
         if top_final > 0:
             for cand in ranked:
                 cand.final = cand.final / top_final
+        return ranked
+
+    def _listwise_rerank(
+        self,
+        plan: QueryPlan,
+        scored: list[Candidate],
+        memories: dict[int, MemoryRow],
+    ) -> list[Candidate]:
+        """Blend LLM listwise relevance into the ranking, in place.
+
+        Returns ``scored`` unchanged when listwise reranking is disabled or
+        unavailable, so the pipeline falls back to the fused/cross-encoder order.
+
+        The question text sent to the judge is the platform's query, and the
+        documents are stored memory text. Nothing the model produces is returned:
+        only the parsed scores are used, which keeps Search on the right side of
+        the "return memory evidence, do not generate" rule.
+        """
+        if not self.listwise or not scored:
+            return scored
+
+        head = scored[: self.settings.listwise_max_candidates]
+        documents: list[str] = []
+        for cand in head:
+            memory = memories.get(cand.memory_id)
+            documents.append(memory.text if memory is not None else "")
+        if not any(documents):
+            return scored
+
+        raw_scores = self.listwise.score(plan.query, documents)
+        if not raw_scores:
+            return scored
+
+        from ..listwise import normalise
+
+        judged = normalise(raw_scores)
+        if len(judged) != len(head):
+            return scored
+
+        weight = self.settings.listwise_weight
+        for cand, score in zip(head, judged):
+            if score is None:
+                continue  # unjudged: leave the existing score alone
+            cand.final = (1.0 - weight) * cand.final + weight * score
+
+        ranked = sorted(scored, key=lambda c: (-c.final, c.memory_id))
+        top = ranked[0].final if ranked else 0.0
+        if top > 0:
+            for cand in ranked:
+                cand.final = cand.final / top
         return ranked

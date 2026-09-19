@@ -109,6 +109,44 @@ Re-measured afterwards, the ranking is unchanged — P1 MRR 0.7248 and recall@10
 reason is that a real session trajectory is already close to maximally compact,
 so the header was costing answer-model budget without buying ranking quality.
 
+### Listwise reranking (LLM): measured, not shipped
+
+A final stage where gpt-4o-mini reads the whole candidate list and scores it
+comparatively. A cross-encoder scores each pair in isolation; a listwise read can
+see that forty candidates all come from the same repository and only one explains
+the failure.
+
+It is implemented, tested, and **off by default**, because it did not earn its
+cost here:
+
+| configuration | MRR | nDCG@10 | recall@10 | precision@10 | Search |
+|---|---|---|---|---|---|
+| P2c, no listwise | **0.7800** | 0.6687 | **0.7186** | 0.2242 | 0.8 s |
+| + listwise, excerpt 700, w 0.5 | 0.7683 | 0.6357 | 0.6746 | 0.2140 | 4.5 s |
+| + listwise, excerpt 1800, w 0.5 | 0.7686 | 0.6399 | 0.6919 | 0.2174 | 5.3 s |
+| + listwise, excerpt 1800, w 0.25 | 0.7656 | 0.6594 | 0.7061 | 0.2230 | 5.6 s |
+
+Two things to read from this. **Attenuating the weight drifts the numbers
+monotonically back toward the baseline** — the signature of a stage contributing
+noise rather than signal. If it carried signal, some weight would beat the
+baseline; none does. And **the excerpt size matters** (700 → 1800 improved
+recall@10 from 0.675 to 0.692), confirming that clipping a whole chunk discards
+the text that decides relevance.
+
+**The confound, stated plainly.** Our ground truth is "touched the same file",
+while the judge optimises "would help answer the question" — different objectives.
+Inspecting a case by hand showed the judge scoring `git clone` boilerplate 0/10
+(*correct* — it answers nothing) while our recall had supplied no relevant memory
+at all. The proxy therefore penalises the judge for disagreeing with it, and the
+drop partly reflects *fewer returned items* after the noise gate removed what the
+judge correctly rejected, not worse ordering.
+
+So the honest position is "unproven on this benchmark", not "useless", and the
+stage stays switchable. Settling it needs the end-to-end Answer/Eval harness
+(platform Answer model + judge), which does not exist yet; that is the next piece
+of work, and listwise should be re-measured there before any decision to enable
+it.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
@@ -116,6 +154,7 @@ so the header was costing answer-model budget without buying ranking quality.
 | Cap items per session at 3 | Recall@100 rose 0.845 → 0.919 and nDCG@100 0.681 → 0.705. Without a cap, ~100 returned chunks collapsed to ~23 distinct sessions, starving other relevant work. |
 | Reject the optimum at cap=1 | cap=1 measured marginally better recall (0.9231 vs 0.9193) but the proxy scores *whether a session was found*, not *whether its content is enough to answer*. Optimizing a measurable proxy at the cost of an unmeasurable quality is how benchmarks get gamed; cap=3 keeps session context for a 0.4 % metric difference. |
 | Rerank weight 0.65, temperature 2.0 | Both swept. Weight: 0.65 peaks (MRR 0.7716); 0.85 and 0.95 degrade (0.7311, 0.7347) even though precision@10 rises — precision@10 is not what the answer model needs. |
+| Listwise reranking off by default | Every setting scored below the no-listwise configuration and cost ~5x search latency. See the table above; the attenuation signature shows it adds noise here, but the proxy measures file overlap rather than usefulness, so this is unresolved rather than settled. |
 | Dense enabled by default, device `auto` | The dense cost/benefit flips with hardware (see the table above). `auto` resolves to CUDA when present and CPU otherwise, so one image is fast on a GPU host and still contract-compliant on a CPU one, rather than being tuned for whichever machine happened to measure first. |
 | Rerank pool 120 | MRR 0.684 / 0.746 / 0.772 at top_n 30 / 60 / 120: larger is better, and on GPU the 120-pool costs 0.5 s per search, so there is no reason to shrink it. |
 | Fixed rerank temperature, not max-normalisation | Normalising by the head's maximum score made every contribution depend on which items happened to be reranked, so changing `rerank_top_n` produced an incoherent sequence (MRR 0.818 → 0.772 → 0.684 as the pool grew). A fixed temperature makes the mapping absolute; the sequence is now monotone (0.684 → 0.746 → 0.772 for top_n 30 → 60 → 120). This also means the earlier 0.8183 figure was an artifact of the flawed normalisation, which is why every number above was re-measured. |
