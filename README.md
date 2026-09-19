@@ -89,18 +89,35 @@ Business errors always use `{"detail": {"reason": "..."}}`.
 ## Configuration
 
 Every tunable is an environment variable, which is what keeps the image
-host-agnostic.
+host-agnostic. Copy `.env.example` for a documented starting point:
+
+```bash
+cp .env.example .env    # then edit; never commit this file
+```
 
 | Variable | Default | Notes |
 |---|---|---|
 | `CODEMEM_DATA_DIR` | `./data` | SQLite location; mount a volume in production |
 | `CODEMEM_PORT` | `8080` | |
 | `CODEMEM_API_KEY` | unset | unset = no auth (smoke only) |
-| `CODEMEM_LLM_ENABLED` | `false` | enrichment is optional |
+| `CODEMEM_LLM_ENABLED` | `false` | enrichment is optional and off by default |
 | `CODEMEM_LLM_BASE_URL` | unset | OpenAI-compatible endpoint |
+| `CODEMEM_LLM_API_KEY` | unset | prefer runtime injection over a committed file |
 | `CODEMEM_LLM_MODEL` | `gpt-4o-mini` | fixed by the rules for open-source entries |
+| `CODEMEM_MAX_EVIDENCE_PER_SESSION` | `3` | session diversity cap; see `eval/README.md` |
 | `CODEMEM_MIN_EVIDENCE_SCORE` | `0.15` | noise gate; calibrate with `eval/` |
 | `CODEMEM_EVIDENCE_BUDGET_TOKENS` | `60000` | total payload budget, well under the 117,760 input window |
+
+**On the model key.** The service currently requires no model at all: chunking,
+identifier extraction, BM25, IDF matching and fusion are deterministic and
+model-free, so a missing key cannot break retrieval. The LLM-backed enrichment
+pass is a later deliverable; today those settings are consumed only by
+`scripts/probe_provider.py`, which checks whether an endpoint actually behaves
+like `gpt-4o-mini` before you rely on it:
+
+```bash
+python scripts/probe_provider.py --base-url "$CODEMEM_LLM_BASE_URL" --api-key "$CODEMEM_LLM_API_KEY"
+```
 
 ## Tests
 
@@ -129,6 +146,13 @@ they are how the tuning decisions were made rather than guessed:
 | `diagnose_channel_attribution.py` | each channel ablated, to attribute a ranking failure |
 | `probe_provider.py` | whether the LLM endpoint behaves like the required model |
 | `loadtest.py` | latency and correctness under concurrent Add/Search |
+
+## Evaluation
+
+See [`eval/README.md`](eval/README.md) for the proxy retrieval benchmark built on
+SWEContextBench and its results (MRR 0.72 vs 0.23 for a random baseline, nDCG@10
+0.61 vs 0.19), including which tuning decisions came from measurement and what
+the benchmark cannot tell us.
 
 ## Documentation
 

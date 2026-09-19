@@ -80,6 +80,12 @@ class Settings:
     evidence_item_tokens: int = 380  # cap for a full-form item
     evidence_ptr_tokens: int = 110  # cap for a pointer-form item
     evidence_excerpt_chars: int = 900
+    # Cap on items returned from one session. A session yields many chunks, and
+    # without a cap they monopolise the ranked list: measured on the proxy
+    # benchmark, ~100 returned chunks collapsed to ~23 distinct sessions, so
+    # other relevant prior work never got a slot. Coverage depends on session
+    # diversity, because a task is answered from a session, not from one chunk.
+    max_evidence_per_session: int = 3
     # Total budget for the whole `data` payload (platform input window minus
     # answer/safety reservation; kept well under 117_760 on purpose).
     evidence_budget_tokens: int = 60_000
@@ -145,6 +151,10 @@ class Settings:
         put("max_chunk_tokens", _env_int("CODEMEM_MAX_CHUNK_TOKENS", 1400))
         put("hard_chunk_chars", _env_int("CODEMEM_HARD_CHUNK_CHARS", 24_000))
         put("evidence_full_count", _env_int("CODEMEM_EVIDENCE_FULL_COUNT", 8))
+        put(
+            "max_evidence_per_session",
+            _env_int("CODEMEM_MAX_EVIDENCE_PER_SESSION", 3),
+        )
         put("evidence_item_tokens", _env_int("CODEMEM_EVIDENCE_ITEM_TOKENS", 380))
         put("evidence_ptr_tokens", _env_int("CODEMEM_EVIDENCE_PTR_TOKENS", 110))
         put("evidence_budget_tokens", _env_int("CODEMEM_EVIDENCE_BUDGET_TOKENS", 60_000))

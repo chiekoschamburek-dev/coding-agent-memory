@@ -1,3 +1,21 @@
 *.pyc
-benchmark/
+__pycache__/
+*.egg-info/
+.pytest_cache/
 .zcode/
+
+# Never commit credentials.
+.env
+
+# Local runtime state.
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Evaluation data. The SWEContextBench clone is a separate 151 MB checkout that
+# ships no licence file, and the derived benchmark is built from it, so neither
+# belongs in this repository. Evaluation data may not be redistributed.
+benchmark/
+eval/data/
+eval/results/

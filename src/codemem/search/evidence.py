@@ -226,6 +226,8 @@ def assemble(
     used = 0
     items: list[EvidenceItem] = []
     seen: set[str] = set()
+    per_session: dict[str, int] = {}
+    session_cap = max(1, settings.max_evidence_per_session)
 
     for rank, cand in enumerate(scored):
         if len(items) >= top_k:
@@ -239,6 +241,13 @@ def assemble(
         # same-repository distractors.
         if cand.final < settings.min_evidence_score and len(items) >= settings.min_evidence_count:
             break
+
+        # Diversity cap. Several chunks of one session are one piece of prior
+        # work; letting one dominate the list starves other sessions, which is
+        # what recall@k actually measures. Skipped items still leave their slot
+        # available for the next session rather than shortening the list.
+        if per_session.get(memory.session_id, 0) >= session_cap:
+            continue
 
         chunk: ChunkRow | None = (
             chunk_map.get(memory.chunk_id) if memory.chunk_id is not None else None
@@ -272,6 +281,7 @@ def assemble(
         if items and used + item_tokens > budget:
             break
         used += item_tokens
+        per_session[memory.session_id] = per_session.get(memory.session_id, 0) + 1
 
         items.append(
             EvidenceItem(

@@ -1,0 +1,351 @@
+"""Run the proxy retrieval benchmark against the service.
+
+Runs in-process through the real HTTP contract (so schema, auth, and
+``top_k`` handling are exercised) and maps returned memory ids back to their
+source session through the store, which is how the file-overlap ground truth is
+compared.
+
+Metrics and their meaning for this competition
+-----------------------------------------------
+The platform feeds the answer model a token-counted *prefix* of our ranked
+output, so:
+
+* ``recall@k``  — is the needed evidence in the prefix at all? If not, no answer
+  model can use it. This is a hard ceiling.
+* ``ndcg@k``    — is it ranked high enough to survive prefix truncation?
+* ``mrr``       — how far down the first useful memory sits.
+* ``precision@k`` — how much of the prefix is signal rather than same-repo noise.
+* ``empty``     — fraction of queries returning nothing. High is not automatically
+  bad (the noise gate is meant to abstain), but it is a ceiling on recall.
+
+Usage::
+
+    python eval/run_benchmark.py --data eval/data/benchmark.json
+    python eval/run_benchmark.py --data ... --top-k 100 --limit 30
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "src")
+sys.path.insert(0, "eval")
+
+from metrics import evaluate  # noqa: E402
+
+
+def load_benchmark(path: Path) -> dict:
+    with path.open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def run(
+    data: dict,
+    *,
+    top_k: int,
+    limit: int | None,
+    ks: tuple[int, ...],
+    quiet: bool,
+    overrides: dict | None = None,
+) -> dict:
+    from fastapi.testclient import TestClient
+
+    from codemem.api.app import create_app
+    from codemem.core.config import Settings
+
+    import logging
+    import tempfile
+
+    logging.disable(logging.WARNING)
+
+    settings = Settings(data_dir=Path(tempfile.mkdtemp()), **(overrides or {}))
+    app = create_app(settings)
+
+    memories = data["memories"]
+    queries = [q for q in data["queries"] if q["relevant"]]
+    if limit:
+        queries = queries[:limit]
+
+    t0 = time.monotonic()
+    with TestClient(app) as client:
+        store = app.state.container.store
+
+        # ---- Add every session -------------------------------------------
+        added = 0
+        skipped = 0
+        for memory in memories:
+            payload = {
+                "request_id": f"bench:{memory['id']}",
+                "user_id": memory["user_id"],
+                "session_id": memory["session_id"],
+                "messages": memory["messages"],
+            }
+            response = client.post("/add", json=payload)
+            if response.status_code != 200:
+                skipped += 1
+                if not quiet:
+                    print(f"  add failed for {memory['id']}: {response.status_code}")
+                continue
+            added += 1
+        add_seconds = time.monotonic() - t0
+
+        # ---- Map memory_id -> session_id per user ------------------------
+        mapping: dict[str, dict[str, str]] = {}
+        with store._read() as conn:  # noqa: SLF001 - eval harness
+            for row in conn.execute("SELECT id, user_id, session_id FROM memory"):
+                mapping.setdefault(row["user_id"], {})[
+                    f"mem_{row['id']}"
+                ] = row["session_id"]
+
+        # ---- Run queries -------------------------------------------------
+        results: dict[str, dict] = {}
+        empties = 0
+        returned_counts: list[int] = []
+        search_times: list[float] = []
+
+        for query in queries:
+            user_id = _user_for_repo(data, query["repo"])
+            started = time.monotonic()
+            response = client.post(
+                "/search",
+                json={"query": query["query"], "user_id": user_id, "top_k": top_k},
+            )
+            search_times.append(time.monotonic() - started)
+            items = response.json().get("data", [])
+            returned_counts.append(len(items))
+            if not items:
+                empties += 1
+            lookup = mapping.get(user_id, {})
+            # Collapse to sessions, keeping first-appearance order: several
+            # chunks of one session are one piece of evidence.
+            ranked: list[str] = []
+            for item in items:
+                session = lookup.get(item["id"])
+                if session and session not in ranked:
+                    ranked.append(session)
+            results[query["query_id"]] = {
+                "ranked": ranked,
+                "relevant": set(query["relevant"]),
+                "repo": query["repo"],
+            }
+
+    metrics = evaluate(results, ks=ks)
+    metrics["empty_rate"] = empties / len(queries) if queries else 0.0
+    metrics["avg_returned"] = (
+        statistics.fmean(returned_counts) if returned_counts else 0.0
+    )
+    metrics["add_seconds"] = round(add_seconds, 1)
+    metrics["search_mean_ms"] = (
+        round(statistics.fmean(search_times) * 1000, 1) if search_times else 0.0
+    )
+
+    random_baseline = _random_baseline(data, queries, ks)
+    return {
+        "metrics": metrics,
+        "random_baseline": random_baseline,
+        "results": results,
+        "counts": {
+            "memories_added": added,
+            "memories_skipped": skipped,
+            "queries": len(queries),
+        },
+    }
+
+
+def _user_for_repo(data: dict, repo: str) -> str:
+    """The benchmark isolates memory per repository (``bench:<repo>``)."""
+    for memory in data["memories"]:
+        if memory["repo"] == repo:
+            return memory["user_id"]
+    return f"bench:{repo}"
+
+
+def _random_baseline(data: dict, queries: list[dict], ks: tuple[int, ...]) -> dict:
+    """Expected metrics for a random ranking over the same pools.
+
+    Gives the numbers a non-trivial retrieval signal must beat; without it a
+    recall figure is unreadable.
+    """
+    import random
+
+    pool: dict[str, list[str]] = {}
+    for memory in data["memories"]:
+        pool.setdefault(memory["user_id"], []).append(memory["session_id"])
+
+    rng = random.Random(20260919)
+    results: dict[str, dict] = {}
+    for query in queries:
+        user_id = _user_for_repo(data, query["repo"])
+        candidates = list(pool.get(user_id, []))
+        rng.shuffle(candidates)
+        results[query["query_id"]] = {
+            "ranked": candidates,
+            "relevant": set(query["relevant"]),
+        }
+    return evaluate(results, ks=ks)
+
+
+def report(out: dict, *, ks: tuple[int, ...], meta: dict) -> None:
+    metrics = out["metrics"]
+    baseline = out["random_baseline"]
+
+    # A random ranking across the same pools cannot score zero unless the
+    # comparison itself is broken (e.g. mismatched id namespaces). Refuse to
+    # print plausible-looking numbers when the harness is suspect.
+    if baseline.get("mrr", 0.0) == 0.0:
+        print(
+            "\nHARNESS ERROR: the random baseline scored exactly zero, which is "
+            "impossible for a non-empty pool. The relevance ids and the returned "
+            "ids are almost certainly in different namespaces, so every metric "
+            "below is meaningless. Fix the harness before drawing conclusions.",
+            file=sys.stderr,
+        )
+
+    print()
+    print("=" * 68)
+    print("Proxy retrieval benchmark (SWEContextBench) — NOT the scored suite")
+    print("=" * 68)
+    print(f"memories added : {out['counts']['memories_added']} "
+          f"(skipped {out['counts']['memories_skipped']})")
+    print(f"queries scored : {out['counts']['queries']}")
+    print(f"add time       : {out['metrics']['add_seconds']}s")
+    print(f"search latency : {metrics['search_mean_ms']}ms mean")
+    print()
+    header = f"{'metric':<16}{'random':>10}{'codemem':>12}{'lift':>10}"
+    print(header)
+    print("-" * len(header))
+    for key in sorted(metrics):
+        if key in ("add_seconds", "search_mean_ms"):
+            continue
+        value = metrics[key]
+        base = baseline.get(key)
+        if isinstance(base, float):
+            lift = f"{value - base:+.4f}" if isinstance(value, float) else "-"
+            print(f"{key:<16}{base:>10.4f}{value:>12.4f}{lift:>10}")
+        else:
+            shown = f"{value:.4f}" if isinstance(value, float) else str(value)
+            print(f"{key:<16}{'-':>10}{shown:>12}{'-':>10}")
+
+    print()
+    print("relevance definition (our proxy):")
+    for line in _wrap(meta.get("relevance_definition", ""), 64):
+        print(f"  {line}")
+    print("caveat:")
+    for line in _wrap(meta.get("relevance_caveats", ""), 64):
+        print(f"  {line}")
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    words = (text or "").split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if len(current) + len(word) + 1 > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--data", type=Path, default=Path("eval/data/benchmark.json")
+    )
+    parser.add_argument("--top-k", type=int, default=100)
+    parser.add_argument("--ks", default="10,100")
+    parser.add_argument("--limit", type=int, default=None, help="query subset")
+    parser.add_argument("--out", type=Path, default=None, help="dump metrics json")
+    parser.add_argument("--dump-per-query", type=Path, default=None)
+    parser.add_argument("--noise-gate", type=float, default=None,
+                        help="override min_evidence_score (0 disables the gate)")
+    parser.add_argument("--budget-tokens", type=int, default=None,
+                        help="override evidence token budget")
+    parser.add_argument("--full-count", type=int, default=None,
+                        help="override how many items use the full evidence form")
+    parser.add_argument("--recall-limit", type=int, default=None,
+                        help="max items the assembler may return")
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args(argv)
+
+    if not args.data.exists():
+        print(
+            f"error: {args.data} not found; run eval/build_benchmark.py first",
+            file=sys.stderr,
+        )
+        return 2
+
+    overrides: dict = {}
+    if args.noise_gate is not None:
+        overrides["min_evidence_score"] = args.noise_gate
+    if args.budget_tokens is not None:
+        overrides["evidence_budget_tokens"] = args.budget_tokens
+    if args.full_count is not None:
+        overrides["evidence_full_count"] = args.full_count
+
+    ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
+    data = load_benchmark(args.data)
+    out = run(
+        data,
+        top_k=args.top_k,
+        limit=args.limit,
+        ks=ks,
+        quiet=args.quiet,
+        overrides=overrides or None,
+    )
+    if overrides:
+        print(f"overrides: {overrides}")
+    report(out, ks=ks, meta=data.get("meta", {}))
+
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with args.out.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {"meta": data.get("meta"), "metrics": out["metrics"],
+                 "random_baseline": out["random_baseline"], "counts": out["counts"]},
+                handle,
+                indent=2,
+            )
+        print(f"\nwrote {args.out}")
+
+    if args.dump_per_query:
+        args.dump_per_query.parent.mkdir(parents=True, exist_ok=True)
+        detail = []
+        for query in data["queries"]:
+            if query["query_id"] not in out["results"]:
+                continue
+            result = out["results"][query["query_id"]]
+            detail.append(
+                {
+                    "query_id": query["query_id"],
+                    "repo": query["repo"],
+                    "n_relevant": len(result["relevant"]),
+                    "n_returned": len(result["ranked"]),
+                    "first_relevant_rank": next(
+                        (
+                            i
+                            for i, s in enumerate(result["ranked"], start=1)
+                            if s in result["relevant"]
+                        ),
+                        None,
+                    ),
+                    "query": query["query"][:300],
+                }
+            )
+        with args.dump_per_query.open("w", encoding="utf-8") as handle:
+            json.dump(detail, handle, indent=2, ensure_ascii=False)
+        print(f"wrote {args.dump_per_query}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

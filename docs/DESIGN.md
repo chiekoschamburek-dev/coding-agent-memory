@@ -194,6 +194,14 @@ compact pointer form, so the token budget buys coverage without truncating the
 strongest evidence. The score sequence is forced strictly decreasing so returned
 order and returned scores can never disagree.
 
+**A per-session cap is required, not cosmetic.** One session produces many chunks,
+and without a cap they crowd out other sessions: measured on the proxy benchmark,
+~100 returned chunks collapsed to ~23 distinct sessions. Since a task is answered
+from a session rather than from one chunk of it, recall depends on session
+diversity. Capping at 3 per session raised recall@100 from 0.845 to 0.919 and
+nDCG@100 from 0.681 to 0.705. Capped-out items are skipped, not truncated, so the
+slot passes to the next session instead of shortening the list.
+
 ## 5. Determinism and reproducibility
 
 Chunking, identifier extraction, and scoring are all pure functions of stored
