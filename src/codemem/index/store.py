@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from ..core.config import Settings
 from ..core.logging import get_logger
@@ -598,35 +598,6 @@ class Store:
             )
             for r in rows
         }
-
-    def entities_for_chunks(
-        self, user_id: str, chunk_ids: Sequence[int], etypes: Iterable[str] | None = None
-    ) -> dict[int, list[tuple[str, str]]]:
-        """Return {chunk_id: [(etype, value_norm)]}, ordered by type priority."""
-        if not chunk_ids:
-            return {}
-        from ..add.entities import ENTITY_WEIGHT
-
-        placeholders = ",".join("?" for _ in chunk_ids)
-        params: list[Any] = [user_id, *chunk_ids]
-        sql = (
-            f"SELECT chunk_id, etype, value_norm FROM chunk_entity"
-            f" WHERE user_id = ? AND chunk_id IN ({placeholders})"
-        )
-        if etypes:
-            etype_list = list(etypes)
-            sql += f" AND etype IN ({','.join('?' for _ in etype_list)})"
-            params.extend(etype_list)
-        with self._read() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        out: dict[int, list[tuple[str, str]]] = {}
-        for row in rows:
-            out.setdefault(int(row["chunk_id"]), []).append(
-                (row["etype"], row["value_norm"])
-            )
-        for chunk_id, items in out.items():
-            items.sort(key=lambda kv: -ENTITY_WEIGHT.get(kv[0], 0.2))
-        return out
 
     def session_recency(self, user_id: str, session_ids: Sequence[str]) -> dict[str, int]:
         """Latest timestamp seen per session, for recency weighting."""

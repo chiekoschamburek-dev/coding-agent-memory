@@ -29,10 +29,22 @@ All three are computed by parsing strings, so they are reproducible, fast, and
 free, and they improve only when our retrieval, ordering, or content selection
 improves.
 
+Under a token prefix
+--------------------
+The platform feeds the answer model a *token-counted prefix* of ``data[]`` in our
+order, so evidence sitting in item 60 of a 67-item payload is not evidence the
+answer model ever sees. Scoring the concatenation of everything we return
+credits exactly that, and inflates long lists: a policy that returns more items
+can only look better, never worse, which is the wrong gradient for a denoising
+system. So every rate is additionally measured at a set of token budgets, taking
+items in order and cutting the straddling one mid-way. Those rows are the graded
+object; the unlimited row is kept for comparison with earlier runs.
+
 Run::
 
     PYTHONPATH=src python eval/run_evidence.py
     PYTHONPATH=src python eval/run_evidence.py --json eval/results/evidence.json
+    PYTHONPATH=src python eval/run_evidence.py --prefix-tokens 2000 4000
 """
 
 from __future__ import annotations
@@ -46,6 +58,7 @@ import re
 import sys
 import tempfile
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 sys.path.insert(0, "src")
@@ -92,14 +105,48 @@ def modified_basenames(blob: str) -> set[str]:
     return out
 
 
+def _prefix_view(contents: list[str], costs: list[int], budget: int) -> tuple[str, int, int]:
+    """The content the answer model actually receives: a token-counted prefix.
+
+    Returns ``(blob, n_items_visible, tokens_visible)``. Items are taken in the
+    order we emit them, and the one that straddles the budget is cut mid-way —
+    modelling the cut as item-aligned would credit the tail of a long item that
+    the model never receives, which is the same inflation in miniature.
+
+    ``budget <= 0`` means no limit.
+    """
+    from codemem.core.tokens import truncate_to_tokens
+
+    if budget <= 0:
+        return "\n\n".join(contents), len(contents), sum(costs)
+    parts: list[str] = []
+    used = 0
+    visible = 0
+    for content, cost in zip(contents, costs):
+        if used + cost <= budget:
+            parts.append(content)
+            used += cost
+            visible += 1
+            continue
+        remaining = budget - used
+        if remaining > 0:
+            parts.append(truncate_to_tokens(content, remaining))
+            used = budget
+            visible += 1
+        break
+    return "\n\n".join(parts), visible, used
+
+
 def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | None,
-        settings_overrides: dict, quiet: bool) -> dict:
+        settings_overrides: dict, quiet: bool,
+        prefix_budgets: Sequence[int] = ()) -> dict:
     logging.disable(logging.WARNING)
 
     from fastapi.testclient import TestClient
 
     from codemem.api.app import create_app
     from codemem.core.config import Settings
+    from codemem.core.tokens import count_tokens
 
     qa = json.loads(questions_path.read_text(encoding="utf-8"))
     bench = json.loads(benchmark_path.read_text(encoding="utf-8"))
@@ -144,18 +191,40 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
                 },
             )
             data = response.json().get("data", [])
-            blob = "\n\n".join(item["content"] for item in data)
-            modified = modified_basenames(blob)
+            contents = [item["content"] for item in data]
+            costs = [count_tokens(content) for content in contents]
 
             gold = _basename(question["gold_file"])
-            decisive = gold in modified
-            distractor_hit = any(
-                _basename(option) in modified
+            distractors = [
+                _basename(option)
                 for i, option in enumerate(question["options"])
                 if i != question["gold_index"]
-            )
+            ]
+
+            def judge(blob: str) -> tuple[bool, bool]:
+                modified = modified_basenames(blob)
+                return (
+                    gold in modified,
+                    any(distractor in modified for distractor in distractors),
+                )
+
+            decisive, distractor_hit = judge("\n\n".join(contents))
             shown_sessions = {session_of.get(item["id"]) for item in data}
             answer_session = question.get("answer_session")
+
+            by_prefix: dict[str, dict] = {}
+            for budget in prefix_budgets:
+                if budget <= 0:
+                    continue
+                prefix_blob, visible, tokens = _prefix_view(contents, costs, budget)
+                p_decisive, p_distractor = judge(prefix_blob)
+                by_prefix[str(budget)] = {
+                    "decisive_present": p_decisive,
+                    "ambiguous": p_distractor,
+                    "decidable": p_decisive and not p_distractor,
+                    "n_visible": visible,
+                    "tokens": tokens,
+                }
 
             rows.append(
                 {
@@ -168,6 +237,8 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
                     "session_retrieved": (
                         answer_session in shown_sessions if answer_session else None
                     ),
+                    "tokens": sum(costs),
+                    "by_prefix": by_prefix,
                 }
             )
             if not quiet and index % 20 == 0:
@@ -175,16 +246,35 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
                 print(f"    {index}/{len(questions)} decidable={rate:.3f}", flush=True)
 
     n = len(rows)
+
+    def rate(key: str) -> float:
+        return sum(bool(r[key]) for r in rows) / n if n else 0.0
+
+    prefix_summary = {}
+    for budget in sorted({int(b) for b in prefix_budgets if int(b) > 0}):
+        entries = [r["by_prefix"].get(str(budget)) for r in rows]
+        entries = [e for e in entries if e is not None]
+        if not entries:
+            continue
+        m = len(entries)
+        prefix_summary[str(budget)] = {
+            "decisive_present_rate": sum(e["decisive_present"] for e in entries) / m,
+            "ambiguity_rate": sum(e["ambiguous"] for e in entries) / m,
+            "decidable_rate": sum(e["decidable"] for e in entries) / m,
+            "mean_visible": sum(e["n_visible"] for e in entries) / m,
+            "mean_tokens": sum(e["tokens"] for e in entries) / m,
+        }
+
     return {
         "n": n,
-        "session_retrieved_rate": (
-            sum(1 for r in rows if r["session_retrieved"]) / n if n else 0.0
-        ),
-        "decisive_present_rate": sum(r["decisive_present"] for r in rows) / n if n else 0.0,
-        "ambiguity_rate": sum(r["ambiguous"] for r in rows) / n if n else 0.0,
-        "decidable_rate": sum(r["decidable"] for r in rows) / n if n else 0.0,
+        "session_retrieved_rate": rate("session_retrieved"),
+        "decisive_present_rate": rate("decisive_present"),
+        "ambiguity_rate": rate("ambiguous"),
+        "decidable_rate": rate("decidable"),
         "mean_returned": sum(r["n_returned"] for r in rows) / n if n else 0.0,
         "mean_sessions": sum(r["n_sessions"] for r in rows) / n if n else 0.0,
+        "mean_tokens": sum(r["tokens"] for r in rows) / n if n else 0.0,
+        "prefix": prefix_summary,
         "rows": rows,
         "settings": settings_overrides,
     }
@@ -197,15 +287,36 @@ def report(result: dict) -> None:
     print("=" * 68)
     print(f"questions                : {result['n']}")
     print(f"answer session retrieved : {result['session_retrieved_rate']:.3f}")
-    print(f"decisive evidence present: {result['decisive_present_rate']:.3f}")
-    print(f"ambiguous (distractor too): {result['ambiguity_rate']:.3f}")
-    print(f"DECIDABLE                : {result['decidable_rate']:.3f}")
     print(f"mean items returned      : {result['mean_returned']:.1f}")
     print(f"mean sessions returned   : {result['mean_sessions']:.1f}")
+    print(f"mean tokens returned     : {result['mean_tokens']:.0f}")
     print()
-    print("  'Decidable' is the number to raise: the returned evidence contains the")
-    print("  line that settles the question and no distractor contradicts it. It is")
-    print("  fully reproducible, so a change either moves it or does not.")
+    print("  as graded: only the token prefix the answer model reads")
+    print(f"  {'prefix':>8} | {'visible':>7} | {'tokens':>7} | {'decisive':>8} |"
+          f" {'ambig':>6} | {'DECIDABLE':>9}")
+    print("  " + "-" * 62)
+    if result["prefix"]:
+        for budget in sorted(result["prefix"], key=int):
+            entry = result["prefix"][budget]
+            print(
+                f"  {budget:>8} | {entry['mean_visible']:>7.1f} |"
+                f" {entry['mean_tokens']:>7.0f} | {entry['decisive_present_rate']:>8.3f} |"
+                f" {entry['ambiguity_rate']:>6.3f} | {entry['decidable_rate']:>9.3f}"
+            )
+    unlimited = (
+        f"  {'all':>8} | {result['mean_returned']:>7.1f} |"
+        f" {result['mean_tokens']:>7.0f} | {result['decisive_present_rate']:>8.3f} |"
+        f" {result['ambiguity_rate']:>6.3f} | {result['decidable_rate']:>9.3f}"
+    )
+    print(unlimited)
+    print()
+    print("  The 'all' row concatenates everything we return, so it credits evidence")
+    print("  the platform never feeds the answer model — it is an upper bound, not a")
+    print("  result. The prefix rows are what is graded.")
+    print()
+    print("  'Decidable' is the number to raise: the evidence the model can see")
+    print("  contains the line that settles the question and no distractor contradicts")
+    print("  it. It is fully reproducible, so a change either moves it or does not.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -220,6 +331,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ptr-tokens", type=int, default=None)
     parser.add_argument("--operative-weight", type=float, default=None)
     parser.add_argument("--max-sessions", type=int, default=None)
+    parser.add_argument(
+        "--prefix-tokens",
+        type=int,
+        nargs="+",
+        default=[1000, 2000, 4000, 8000],
+        help="token budgets to score at, modelling the platform's counted prefix",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -249,7 +367,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_max_sessions"] = args.max_sessions
 
     result = run(args.qa, args.data, top_k=args.top_k, limit=args.limit,
-                 settings_overrides=overrides, quiet=args.quiet)
+                 settings_overrides=overrides, quiet=args.quiet,
+                 prefix_budgets=args.prefix_tokens)
     report(result)
 
     if args.json:

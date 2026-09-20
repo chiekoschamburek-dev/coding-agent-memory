@@ -19,3 +19,5 @@ data/
 benchmark/
 eval/data/
 eval/results/
+.workbuddy
+.codebuddy

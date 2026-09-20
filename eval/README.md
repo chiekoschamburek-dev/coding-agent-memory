@@ -321,18 +321,23 @@ Everything is string parsing, so it is reproducible, fast and free. Baseline:
 |---|---|
 | answer session retrieved | **1.000** |
 | decisive evidence present | 0.500 |
-| ambiguous | 0.367 |
-| **decidable** | **0.300** |
+| ambiguous | 0.467 |
+| **decidable** | **0.233** |
+
+(The 0.300 / 0.367 figures recorded earlier were measured before assembly became
+session-major; re-measured on the shipped code they are 0.233 / 0.467. Read the
+next section before trusting any of them — this table concatenates the whole
+payload, which is not what gets graded.)
 
 Two things follow. **Recall is not the problem** — the right session is in context
 every time, which is why adding more retrieval channels would be wasted effort.
 The losses are entirely in what we return: half the time the decisive line is cut
-away, and in more than a third of cases evidence from *another* session makes a
+away, and in nearly half of cases evidence from *another* session makes a
 distractor look modified too.
 
-`decidable` = 0.300 agrees with the non-deterministic answer accuracy measured
-earlier (0.333), which is the validation that it measures the same thing — while
-being reproducible.
+`decidable` = 0.233 is in the same range as the non-deterministic answer accuracy
+measured earlier (0.333), which is the validation that it measures the same thing
+— while being reproducible.
 
 **Operative weighting, swept on the deterministic metric:**
 
@@ -422,6 +427,70 @@ Ordering by session and promoting the operative chunk is free on ranking metrics
 that cannot see the difference — file overlap does not care which of a session's
 chunks is first — and it is not free on the metric that can.
 
+### Scoring only what the answer model can read
+
+The metric above concatenated **everything** we return. That is not the graded
+object: the platform feeds the answer model a token-counted *prefix* of `data[]`
+in our order, so evidence sitting in item 60 of a 66-item payload is not evidence
+anything reads. Worse, the gradient was wrong — a policy that returns more items
+could only score higher, never lower, which points a denoising system the wrong
+way. `run_evidence.py` now scores a ladder of token budgets, taking items in
+emission order and cutting the straddling one mid-way:
+
+    python eval/run_evidence.py --prefix-tokens 1000 2000 4000 8000
+
+At shipped defaults (30 questions, mean 65.7 items / 6 518 tokens returned):
+
+| prefix | items visible | decisive | ambiguous | **decidable** |
+|---|---|---|---|---|
+| 1 000 tokens | 5.5 | 0.267 | 0.067 | **0.233** |
+| 2 000 | 13.5 | 0.367 | 0.200 | **0.233** |
+| 4 000 | 33.9 | 0.433 | 0.367 | **0.233** |
+| 8 000 | 60.0 | 0.500 | 0.467 | **0.233** |
+| all (upper bound) | 65.7 | 0.500 | 0.467 | 0.233 |
+
+Two things fall out.
+
+**The old headline number was inflated by the tail.** `decisive_present = 0.500`
+was reported as "half the time the decisive line survives"; under a 1 000-token
+prefix it is 0.267. The other 0.233 of credit came from items 6–66.
+
+**`decidable` is flat at 0.233 across the whole ladder.** The tail is neither
+neutral nor a trade-off — it adds decisive evidence and contradiction in lockstep,
+so it moves questions from "neither" straight to "both" and never to "decidable".
+The same answer-carrying quality is reached at 5.5 visible items as at 65.7. That
+is the strongest argument yet for spending the budget on *session ranking* rather
+than on breadth: most of the returned items are, on this measurement, doing
+nothing but contradicting each other.
+
+The `all` row is kept for comparison with earlier runs and is labelled an upper
+bound, not a result.
+
+**The compact payload matches it.** Re-run with `evidence_max_sessions=1`:
+
+| payload | items | tokens | decisive | ambiguous | **decidable** |
+|---|---|---|---|---|---|
+| shipped defaults | 65.7 | 6 518 | 0.500 | 0.467 | **0.233** |
+| `max_sessions=1` | 2.9 | 676 | 0.267 | 0.067 | **0.233** |
+
+Three items score the same as sixty-six on the graded metric, at a tenth of the
+tokens, and they fit inside a 1 000-token prefix so they are not prefix-sensitive
+at all. Counting from the rates: the tail adds decisive evidence on 7 more
+questions and adds a contradicting distractor on 12 more, and `decidable` does not
+move — so every question where the tail contributes evidence is a question where
+it also contributes noise. `session_retrieved` falls to 0.533, as it must when
+only one session is shown, and `decidable` is unchanged, which says the questions
+lost were never decidable.
+
+This does not yet reverse the shipped default. `decidable` is a proxy: it cannot
+see whether a stronger answer model resolves an ambiguity our string parser
+cannot, and the platform's real prefix length is not published, so a large prefix
+would show 0.500 decisive rather than 0.267. What it does establish is that
+breadth is not currently buying anything measurable, and that ambiguity — the
+dominant error mode — is 7x lower in the compact payload. The decision to leave
+`evidence_max_sessions=0` should be re-tested against an end-to-end Answer run
+before it is treated as settled.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
@@ -437,7 +506,7 @@ chunks is first — and it is not free on the metric that can.
 | Clip rerank documents by token count, in one batch | Characters are a bad cost proxy on this model family: 2 048 characters can be 630 tokens while 40 characters is 21, and latency scales with real tokens (4 ms/doc at 21 tokens, 48 ms/doc at 1 034). Token clipping took long-memory reranking from 48 to ~14 ms/doc. Batching the tokenizer call (120 docs in one call rather than 120 calls) took the pool of 120 from 6.0 s to 2.1 s. |
 | Keep the noise gate at 0.15 | On this benchmark gate=0 and gate=0.15 score identically, because lexical/entity recall already bounds the candidate set: the gate is not the active constraint here. It is retained because its purpose is the *unrelated-query* case, which this dataset does not exercise — that case is covered by `tests/test_ranking_scale.py` with synthetic same-repo noise. |
 | Promote the operative chunk, but only within the top session | Promoting it in every session raised decisive evidence 0.500 → 0.667 and ambiguity 0.367 → 0.567 simultaneously, netting *below* baseline. Restricted to the session we already rank first it gained on all three axes (0.567 / 0.333 / 0.333). The same lever applied everywhere is the same lever applied to evidence we do not believe. |
-| Do not cap distinct sessions (`evidence_max_sessions=0`) | The prediction was that tightening the cap buys precision with coverage we could spare, since the answer session was retrieved 100% of the time. Wrong: it is in the payload 100% of the time but is the *top-ranked* session only 70% of the time, so `decidable` stayed flat 0.27–0.30 while decisive fell from 0.667 to 0.300. What actually needs work is session ranking, not assembly breadth. |
+| Do not cap distinct sessions (`evidence_max_sessions=0`) | The prediction was that tightening the cap buys precision with coverage we could spare, since the answer session was retrieved 100% of the time. Wrong: it is in the payload 100% of the time but is the *top-ranked* session only 70% of the time, so `decidable` stayed flat while decisive fell. What actually needs work is session ranking, not assembly breadth. **Under the prefix metric this is now much less clear** — `max_sessions=1` scores the same `decidable` at 676 tokens instead of 6 518; see the section above. Re-test before treating this as settled. |
 | Session-major assembly is free on the retrieval proxy | MRR 0.7800 and recall@10 0.7186 unchanged, nDCG@100 0.7306 → 0.7368, items 67 → 59. File-overlap ground truth cannot distinguish which chunk of a session leads, so a change that only affects chunk *identity* inside a session shows up as no cost. |
 
 ### What this benchmark cannot tell us
