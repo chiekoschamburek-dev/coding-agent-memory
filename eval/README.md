@@ -353,6 +353,75 @@ reader to tell which session a marker belongs to, so another session's edit can
 contradict the answer. n=30 means one question is 0.033, so these differences are
 directions with a mechanism, not established effects.
 
+### Assembly: sessions rank, chunks are evidence
+
+`assemble` used to walk the globally sorted chunk list and count how many items
+each session had already taken, which conflates two decisions: which session is
+the answer, and which text represents it. It now groups candidates by session
+first, so the session's head chunk *is* its score, the noise gate applies to it,
+and within a session the operative chunk can be promoted into the first slot
+(`evidence_operative_promotion`, `-1` = all sessions, `0` = never;
+`evidence_max_sessions` caps distinct sessions, `0` = unlimited).
+
+Promotion targets a measured loss: a session yields ~47 tool-call chunks that are
+near-identical to each other — the same file read five times and edited once — and
+they score alike because the paths carry the term weight while the verb `Edit`
+carries none. Taken by score alone, the edit sits eighth in its own session and
+never reaches a slot. It is also absent from every query vocabulary: the word
+`edit` appeared in **0 of 30** questions and options.
+
+Two predictions were tested and one failed:
+
+| `max_sessions` | promotion | session retrieved | decisive | ambiguous | **decidable** | items |
+|---|---|---|---|---|---|---|
+| 0 (unlimited) | all | 1.000 | **0.667** | **0.567** | 0.267 | 67.1 |
+| 0 | top 3 | 1.000 | 0.633 | 0.500 | 0.267 | 67.1 |
+| **0** | **top 1 (default)** | 1.000 | 0.567 | **0.333** | **0.333** | 67.1 |
+| 0 | never | 1.000 | 0.500 | 0.367 | 0.300 | 67.1 |
+| 5 | top 1 | 0.933 | 0.400 | 0.167 | 0.333 | 13.9 |
+| 3 | top 1 | 0.900 | 0.333 | 0.100 | 0.267 | 8.6 |
+| 1 | any | 0.700 | 0.300 | 0.000 | 0.300 | 3.0 |
+
+**Promotion works on its own axis and fails on the aggregate.** Promoting in every
+session recovered decisive evidence 0.500 → 0.667 exactly as predicted, and raised
+ambiguity 0.367 → 0.567 at the same time, because promoting an action surfaces
+*other* sessions' actions too. Restricting promotion to the single session we
+consider most likely to be the answer is the only setting that improved on all
+three axes over the baseline simultaneously: decisive 0.567, ambiguous 0.333,
+decidable 0.333.
+
+**Capping sessions to buy precision did not work.** The plan was to spend
+coverage — we had it at 1.000 — on removing contradiction. Measured, coverage is
+not as free as it looked: the answer session is present somewhere in 67 items but
+is the *top-ranked* session in only 70% of questions, so tightening the cap loses
+decisive evidence as fast as ambiguity and `decidable` stays flat at 0.27–0.30 all
+the way down. The session ranking, not the assembly policy, is the binding
+constraint.
+
+The cap is still worth knowing about for a different reason: at `max_sessions=1`
+ambiguity is 0.000 and `decidable` equals the baseline's 0.300 while the payload is
+**3 items instead of 67** — the same answer-carrying quality for a twentieth of the
+tokens. That matters under a real input window, which our metric does not model:
+`run_evidence.py` concatenates everything we return, so it scores tail items the
+platform may never show the answer model. Making the metric honour a token prefix
+is the next measurement to build, because it is the graded object.
+
+**Cost on the retrieval proxy: none.** Re-measured with the new assembly at the
+shipped defaults, against the file-overlap ground truth:
+
+| metric | before | after |
+|---|---|---|
+| MRR | 0.7800 | 0.7800 |
+| nDCG@10 | 0.6687 | 0.6686 |
+| nDCG@100 | 0.7306 | 0.7368 |
+| recall@10 | 0.7186 | 0.7186 |
+| precision@10 | 0.2242 | 0.2242 |
+| mean items returned | ~67 | 59.2 |
+
+Ordering by session and promoting the operative chunk is free on ranking metrics
+that cannot see the difference — file overlap does not care which of a session's
+chunks is first — and it is not free on the metric that can.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
@@ -367,6 +436,9 @@ directions with a mechanism, not established effects.
 | Fixed rerank temperature, not max-normalisation | Normalising by the head's maximum score made every contribution depend on which items happened to be reranked, so changing `rerank_top_n` produced an incoherent sequence (MRR 0.818 → 0.772 → 0.684 as the pool grew). A fixed temperature makes the mapping absolute; the sequence is now monotone (0.684 → 0.746 → 0.772 for top_n 30 → 60 → 120). This also means the earlier 0.8183 figure was an artifact of the flawed normalisation, which is why every number above was re-measured. |
 | Clip rerank documents by token count, in one batch | Characters are a bad cost proxy on this model family: 2 048 characters can be 630 tokens while 40 characters is 21, and latency scales with real tokens (4 ms/doc at 21 tokens, 48 ms/doc at 1 034). Token clipping took long-memory reranking from 48 to ~14 ms/doc. Batching the tokenizer call (120 docs in one call rather than 120 calls) took the pool of 120 from 6.0 s to 2.1 s. |
 | Keep the noise gate at 0.15 | On this benchmark gate=0 and gate=0.15 score identically, because lexical/entity recall already bounds the candidate set: the gate is not the active constraint here. It is retained because its purpose is the *unrelated-query* case, which this dataset does not exercise — that case is covered by `tests/test_ranking_scale.py` with synthetic same-repo noise. |
+| Promote the operative chunk, but only within the top session | Promoting it in every session raised decisive evidence 0.500 → 0.667 and ambiguity 0.367 → 0.567 simultaneously, netting *below* baseline. Restricted to the session we already rank first it gained on all three axes (0.567 / 0.333 / 0.333). The same lever applied everywhere is the same lever applied to evidence we do not believe. |
+| Do not cap distinct sessions (`evidence_max_sessions=0`) | The prediction was that tightening the cap buys precision with coverage we could spare, since the answer session was retrieved 100% of the time. Wrong: it is in the payload 100% of the time but is the *top-ranked* session only 70% of the time, so `decidable` stayed flat 0.27–0.30 while decisive fell from 0.667 to 0.300. What actually needs work is session ranking, not assembly breadth. |
+| Session-major assembly is free on the retrieval proxy | MRR 0.7800 and recall@10 0.7186 unchanged, nDCG@100 0.7306 → 0.7368, items 67 → 59. File-overlap ground truth cannot distinguish which chunk of a session leads, so a change that only affects chunk *identity* inside a session shows up as no cost. |
 
 ### What this benchmark cannot tell us
 

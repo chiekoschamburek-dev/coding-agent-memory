@@ -86,6 +86,20 @@ class Settings:
     # other relevant prior work never got a slot. Coverage depends on session
     # diversity, because a task is answered from a session, not from one chunk.
     max_evidence_per_session: int = 3
+    # Cap on distinct sessions in one payload. 0 means unlimited, which is the
+    # measured default: tightening it (5/3/1) lowers ambiguity monotonically but
+    # leaves `decidable` flat (~0.27-0.30) while answer-session retrieval falls
+    # 1.000 -> 0.933 -> 0.900 -> 0.700. Coverage is not what it buys. See eval/.
+    evidence_max_sessions: int = 0
+    # Promote a session's operative chunk into its first slot, but only for the
+    # top this-many sessions (-1 = every session, 0 = never). Promotion is a
+    # double-edged lever: it recovers an edit that its own read-heavy siblings
+    # outscored, but it also surfaces *other* sessions' edits, which is what
+    # makes a distractor look modified too. Measured on the 30-question evidence
+    # set, promoting everywhere moved decisive 0.500 -> 0.667 and ambiguity
+    # 0.367 -> 0.567 at the same time; promoting within the top session only
+    # gained on all three axes at once (0.567 / 0.333 / 0.333).
+    evidence_operative_promotion: int = 1
     # Weight given to "operative" lines (what a session DID) relative to query-term
     # matches when choosing a verbatim window from a long memory. An engineering
     # trajectory records its actions as tool calls and diffs, and those lines are
@@ -233,6 +247,14 @@ class Settings:
         put("max_chunk_tokens", _env_int("CODEMEM_MAX_CHUNK_TOKENS", 1400))
         put("hard_chunk_chars", _env_int("CODEMEM_HARD_CHUNK_CHARS", 24_000))
         put("evidence_full_count", _env_int("CODEMEM_EVIDENCE_FULL_COUNT", 8))
+        put(
+            "evidence_max_sessions",
+            _env_int("CODEMEM_EVIDENCE_MAX_SESSIONS", 0),
+        )
+        put(
+            "evidence_operative_promotion",
+            _env_int("CODEMEM_EVIDENCE_OPERATIVE_PROMOTION", 1),
+        )
         put(
             "evidence_operative_weight",
             _env_float("CODEMEM_EVIDENCE_OPERATIVE_WEIGHT", 1.0),

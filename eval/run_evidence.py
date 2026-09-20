@@ -164,6 +164,7 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
                     "ambiguous": distractor_hit,
                     "decidable": decisive and not distractor_hit,
                     "n_returned": len(data),
+                    "n_sessions": len(shown_sessions - {None}),
                     "session_retrieved": (
                         answer_session in shown_sessions if answer_session else None
                     ),
@@ -183,6 +184,7 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
         "ambiguity_rate": sum(r["ambiguous"] for r in rows) / n if n else 0.0,
         "decidable_rate": sum(r["decidable"] for r in rows) / n if n else 0.0,
         "mean_returned": sum(r["n_returned"] for r in rows) / n if n else 0.0,
+        "mean_sessions": sum(r["n_sessions"] for r in rows) / n if n else 0.0,
         "rows": rows,
         "settings": settings_overrides,
     }
@@ -199,6 +201,7 @@ def report(result: dict) -> None:
     print(f"ambiguous (distractor too): {result['ambiguity_rate']:.3f}")
     print(f"DECIDABLE                : {result['decidable_rate']:.3f}")
     print(f"mean items returned      : {result['mean_returned']:.1f}")
+    print(f"mean sessions returned   : {result['mean_sessions']:.1f}")
     print()
     print("  'Decidable' is the number to raise: the returned evidence contains the")
     print("  line that settles the question and no distractor contradicts it. It is")
@@ -216,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--full-count", type=int, default=None)
     parser.add_argument("--ptr-tokens", type=int, default=None)
     parser.add_argument("--operative-weight", type=float, default=None)
+    parser.add_argument("--max-sessions", type=int, default=None)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -241,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_ptr_tokens"] = args.ptr_tokens
     if args.operative_weight is not None:
         overrides["evidence_operative_weight"] = args.operative_weight
+    if args.max_sessions is not None:
+        overrides["evidence_max_sessions"] = args.max_sessions
 
     result = run(args.qa, args.data, top_k=args.top_k, limit=args.limit,
                  settings_overrides=overrides, quiet=args.quiet)

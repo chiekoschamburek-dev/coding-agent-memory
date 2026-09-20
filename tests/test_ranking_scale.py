@@ -168,6 +168,64 @@ def test_stronger_lexical_match_outranks_weaker_one(settings):
         store.close()
 
 
+def test_operative_chunk_beats_its_own_siblings_for_a_slot(settings):
+    """Within one session the edit is outscored by its own reads.
+
+    A trajectory reads a file several times and edits it once. The read records
+    repeat the path with surrounding explanation, so on every channel they
+    outscore the one line that says what was changed, and the per-session cap
+    keeps only the top three — which are reads. The word ``edit`` is in none of
+    the queries, so term weighting cannot recover it either. Promotion of the
+    operative chunk inside the top-ranked session is what puts it in the payload.
+    """
+    store = Store(settings)
+    try:
+        add = AddPipeline(settings, store)
+
+        def read(index: int) -> str:
+            return (
+                '[tool Read] {"file_path": "src/orders/checkout.py", "limit": 40}\n'
+                f"Inspecting checkout latency in src/orders/checkout.py, pass {index}: "
+                "the handler queries the order, then loops over items and loads each "
+                "one, so checkout in src/orders/checkout.py issues one query per order "
+                "item here."
+            )
+
+        edit = (
+            '[tool Edit] {"file_path": "src/orders/checkout.py", '
+            '"old_string": "for item in order.items:", '
+            '"new_string": "for item in order.items_loaded:"}\n'
+        )
+        messages = [_M(read(i)) for i in range(6)] + [_M(edit)]
+        add.handle(
+            request_id="work",
+            user_id="u1",
+            session_id="work",
+            messages=messages,
+        )
+        search = SearchPipeline(settings, store)
+        query = "Why was checkout slow in src/orders/checkout.py and what changed?"
+
+        settings.evidence_operative_promotion = 0
+        without = search.handle(user_id="u1", query=query, options=None, top_k=100)
+        settings.evidence_operative_promotion = 1
+        with_promotion = search.handle(user_id="u1", query=query, options=None, top_k=100)
+    finally:
+        store.close()
+
+    assert without, "the session must be retrievable at all"
+    assert not any(
+        "[tool Edit]" in item.content for item in without
+    ), "the fixture no longer reproduces the loss this test exists for"
+    assert any("[tool Edit]" in item.content for item in with_promotion), (
+        "promotion failed to place the operative chunk in the payload"
+    )
+    scores = [item.score for item in with_promotion]
+    assert all(a > b for a, b in zip(scores, scores[1:])), (
+        "session-major ordering must still return strictly decreasing scores"
+    )
+
+
 def test_recency_alone_cannot_qualify_a_memory(settings):
     """Recency is not evidence: it may break ties among matching memories but
     must never pull a non-matching one into the results."""

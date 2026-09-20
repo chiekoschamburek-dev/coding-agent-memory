@@ -9,14 +9,18 @@ kind/intent alignment, and a superseded penalty. Recency only ever nudges — it
 never filters, because trajectories do not tell us the repository's current
 state.
 
-**Assembly.** The content of every returned item is built *only* from what Add
-already stored: verbatim excerpts plus deterministically extracted identifiers.
-Search performs no generation. The fixed header template is formatting, not new
-claims — every field is literally a value computed during Add.
+**Assembly.** Sessions are ranked and chunks are the evidence: one session is one
+piece of prior work, so its best chunk *is* its score, and the noise gate is
+applied to that rather than to whichever chunk happens to come next. Within the
+session we consider most likely to hold the answer, the chunk recording what the
+session *did* leads, because a trajectory's reads outscore its single edit on
+every channel and would otherwise take the only slots.
 
-Items are shaped as a pyramid: a full form for the head of the list and a
-pointer form for the tail, so the token budget buys maximum coverage without
-truncating the strongest evidence.
+The content of every returned item is a verbatim span of what Add already stored.
+Search performs no generation: truncation to fit the token budget is selection and
+is allowed, rewriting is not. Items are shaped as a pyramid — a full form for the
+head of the list, a pointer form for the tail — so the budget buys coverage
+without truncating the strongest evidence.
 """
 
 from __future__ import annotations
@@ -26,10 +30,9 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
-from ..add.entities import ENTITY_WEIGHT
 from ..core.config import Settings
 from ..core.tokens import count_tokens, truncate_to_tokens
-from ..index.store import ChunkRow, MemoryRow, Store
+from ..index.store import MemoryRow, Store
 from .query import QueryPlan
 from .retriever import (
     COVERAGE_WEIGHT_IN_FINAL,
@@ -208,6 +211,36 @@ def _operative_score(line: str) -> int:
     return sum(1 for pattern in _OPERATIVE_RES if pattern.search(line))
 
 
+def _has_operative_line(text: str) -> bool:
+    return any(
+        pattern.search(line) for line in text.splitlines() for pattern in _OPERATIVE_RES
+    )
+
+
+def _role_ordered(
+    group: list[Candidate], sources: dict[int, str]
+) -> list[Candidate]:
+    """Move the best operative candidate to the front of one session's slice.
+
+    A session yields tens of tool-call chunks that are near-identical to each
+    other — the same file read five times and edited once — and they score
+    alike on every channel because the paths carry the term weight and the verb
+    carries none. Ordered by score alone, the edit can sit eighth in its own
+    session and never reach a slot.
+    """
+    index = next(
+        (
+            i
+            for i, cand in enumerate(group)
+            if _has_operative_line(sources[cand.memory_id])
+        ),
+        None,
+    )
+    if index in (None, 0):
+        return group
+    return [group[index], *group[:index], *group[index + 1 :]]
+
+
 def _select_span(
     text: str,
     budget_tokens: int,
@@ -287,7 +320,14 @@ def assemble(
     *,
     top_k: int,
 ) -> list[EvidenceItem]:
-    """Build the ranked ``data`` payload, respecting gates and token budget."""
+    """Build the ranked ``data`` payload, respecting gates and token budget.
+
+    Sessions are the ranking unit and chunks the evidence unit. ``scored`` is
+    already in descending score order, so grouping it by session preserves both
+    the session order (each session's head is its best chunk) and the order
+    within a session. The noise gate then applies to a session's *best* evidence
+    rather than to whichever of its chunks happens to come next.
+    """
     if not scored or top_k <= 0:
         return []
 
@@ -296,89 +336,121 @@ def assemble(
         for c in scored
         if c.memory_id in memories and memories[c.memory_id].chunk_id is not None
     ]
-    entity_map = store.entities_for_chunks(user_id, chunk_ids)
     chunk_map = store.fetch_chunks(user_id, chunk_ids)
+
+    groups: dict[str, list[Candidate]] = {}
+    order: list[str] = []
+    for cand in scored:
+        memory = memories.get(cand.memory_id)
+        if memory is None:
+            continue
+        if memory.session_id not in groups:
+            groups[memory.session_id] = []
+            order.append(memory.session_id)
+        groups[memory.session_id].append(cand)
+
+    source_of = {
+        cand.memory_id: (
+            chunk_map[memories[cand.memory_id].chunk_id].text
+            if memories[cand.memory_id].chunk_id in chunk_map
+            else memories[cand.memory_id].text
+        )
+        for cand in scored
+        if cand.memory_id in memories
+    }
 
     budget = settings.evidence_budget_tokens
     used = 0
     items: list[EvidenceItem] = []
     seen: set[str] = set()
-    per_session: dict[str, int] = {}
+    sessions_used = 0
     session_cap = max(1, settings.max_evidence_per_session)
+    max_sessions = settings.evidence_max_sessions  # 0 = unlimited
+    # Emission order is the relevance order we assert, so scores are clamped to
+    # it: a second chunk of the decisive session can score below the head of a
+    # weaker session while still being the better thing to show first.
+    ceiling = float("inf")
 
-    for rank, cand in enumerate(scored):
+    for session_index, session_id in enumerate(order):
+        if max_sessions and sessions_used >= max_sessions:
+            break
         if len(items) >= top_k:
             break
 
-        memory = memories.get(cand.memory_id)
-        if memory is None:
-            continue
-
+        group = groups[session_id]
         # Noise gate: stop rather than pad the answer model's prefix with
         # same-repository distractors.
-        if cand.final < settings.min_evidence_score and len(items) >= settings.min_evidence_count:
+        if group[0].final < settings.min_evidence_score and len(
+            items
+        ) >= settings.min_evidence_count:
             break
 
-        # Diversity cap. Several chunks of one session are one piece of prior
-        # work; letting one dominate the list starves other sessions, which is
-        # what recall@k actually measures. Skipped items still leave their slot
-        # available for the next session rather than shortening the list.
-        if per_session.get(memory.session_id, 0) >= session_cap:
-            continue
+        promote = settings.evidence_operative_promotion
+        if promote < 0 or session_index < promote:
+            group = _role_ordered(group, source_of)
 
-        chunk: ChunkRow | None = (
-            chunk_map.get(memory.chunk_id) if memory.chunk_id is not None else None
-        )
+        taken = 0
+        for cand in group:
+            if taken >= session_cap or len(items) >= top_k:
+                break
 
-        body_source = chunk.text if chunk is not None else memory.text
-        full_form = rank < settings.evidence_full_count
-        budget_for_item = (
-            settings.evidence_item_tokens if full_form else settings.evidence_ptr_tokens
-        )
-
-        # content is a verbatim span of the stored memory. No header, no labels,
-        # no rewriting: the contract states returned content is preserved
-        # verbatim for audit, and the schema's example is plain remembered text.
-        # Identifiers live in the index as retrieval keys, not in the payload,
-        # and the source timestamp belongs in `created_at`, not in the text.
-        content, truncated = _select_span(
-            body_source,
-            budget_for_item,
-            plan.keywords,
-            settings.evidence_operative_weight,
-        )
-        stamped = _iso_from_ms(memory.ts)
-
-        # Repeated text across sessions adds no new evidence but would consume
-        # the answer model's context.
-        if content in seen:
-            continue
-        seen.add(content)
-
-        item_tokens = count_tokens(content)
-        if items and used + item_tokens > budget:
-            break
-        used += item_tokens
-        per_session[memory.session_id] = per_session.get(memory.session_id, 0) + 1
-
-        items.append(
-            EvidenceItem(
-                memory_id=memory.id,
-                content=content,
-                score=round(cand.final, 6),
-                # The contract defines created_at as the memory's source time or
-                # persistence time. We prefer the source timestamp supplied by
-                # the platform; only when the source had none do we fall back to
-                # our own write time, and the two are never conflated.
-                created_at=stamped or memory.created_at,
-                tokens=item_tokens,
-                truncated=truncated,
-                superseded=memory.superseded_by is not None,
+            memory = memories[cand.memory_id]
+            body_source = source_of[cand.memory_id]
+            full_form = len(items) < settings.evidence_full_count
+            budget_for_item = (
+                settings.evidence_item_tokens if full_form else settings.evidence_ptr_tokens
             )
-        )
 
-    # Guarantee a strictly decreasing score sequence so the returned order and
-    # the returned scores can never disagree, whatever the tie situation.
+            # content is a verbatim span of the stored memory. No header, no labels,
+            # no rewriting: the contract states returned content is preserved
+            # verbatim for audit, and the schema's example is plain remembered text.
+            # Identifiers live in the index as retrieval keys, not in the payload,
+            # and the source timestamp belongs in `created_at`, not in the text.
+            content, truncated = _select_span(
+                body_source,
+                budget_for_item,
+                plan.keywords,
+                settings.evidence_operative_weight,
+            )
+            stamped = _iso_from_ms(memory.ts)
+
+            # Repeated text across sessions adds no new evidence but would consume
+            # the answer model's context.
+            if content in seen:
+                continue
+            seen.add(content)
+
+            item_tokens = count_tokens(content)
+            if items and used + item_tokens > budget:
+                break
+            used += item_tokens
+
+            score = min(cand.final, ceiling)
+            ceiling = score
+            items.append(
+                EvidenceItem(
+                    memory_id=memory.id,
+                    content=content,
+                    score=round(score, 6),
+                    # The contract defines created_at as the memory's source time or
+                    # persistence time. We prefer the source timestamp supplied by
+                    # the platform; only when the source had none do we fall back to
+                    # our own write time, and the two are never conflated.
+                    created_at=stamped or memory.created_at,
+                    tokens=item_tokens,
+                    truncated=truncated,
+                    superseded=memory.superseded_by is not None,
+                )
+            )
+            taken += 1
+
+        if taken:
+            sessions_used += 1
+
+    # The contract requires a higher score to mean stronger relevance, and
+    # emission order is the relevance order we assert, so decay by position by
+    # more than the six-decimal rounding can absorb: a 1e-7 relative nudge rounds
+    # back to the same value as its neighbour and yields two equal scores.
     for idx, item in enumerate(items):
-        item.score = round(max(item.score, 1e-6) * (1.0 - idx * 1e-7), 6)
+        item.score = round(max(item.score - idx * 1e-5, 1e-6), 6)
     return items
