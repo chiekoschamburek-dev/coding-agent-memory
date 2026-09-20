@@ -231,6 +231,7 @@ def run_condition(
             context = ""
             n_shown = 0
             n_relevant_shown = 0
+            answer_shown = False  # no memory is supplied in the baseline condition
             if with_memory:
                 user_id = _user_for_repo(memories, question["repo"])
                 response = client.post(
@@ -248,11 +249,16 @@ def run_condition(
                 context, n_shown = format_context(data, budget_tokens)
 
                 relevant = set(question.get("relevant_sessions") or [])
-                if relevant:
-                    shown_sessions = {
-                        mapping.get(item["id"]) for item in data[:n_shown]
-                    }
-                    n_relevant_shown = len(shown_sessions & relevant)
+                shown_sessions = {mapping.get(item["id"]) for item in data[:n_shown]}
+                n_relevant_shown = len(shown_sessions & relevant)
+                # Whether the session holding the answer was actually retrieved.
+                # This is the diagnostic that decides how to read the result: a
+                # failure to recall is a retrieval problem, a failure to use a
+                # recalled answer is an answer-model problem.
+                answer_session = question.get("answer_session")
+                answer_shown = bool(
+                    answer_session and answer_session in shown_sessions
+                )
 
             choice, raw = answerer.answer(
                 question["question"], question["options"], context
@@ -267,6 +273,7 @@ def run_condition(
                     "parsed": choice is not None,
                     "n_shown": n_shown,
                     "n_relevant_shown": n_relevant_shown,
+                    "answer_session_shown": answer_shown,
                     "reply": raw[:40],
                 }
             )

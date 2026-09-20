@@ -229,6 +229,48 @@ patches and running the SWE-bench test harness (`FAIL_TO_PASS` / `PASS_TO_PASS`)
 which needs repository checkouts and per-task Docker images; the infrastructure is
 in `benchmark/SWEContextBench/swebench_memory/harness/`.
 
+### Why the answer model gets 0.333: the decisive line is dropped
+
+The session-artifact questions have a clean validity check (no-memory 0.233 ≈
+chance 0.25), so the +0.100 from memory is real signal. But the retrieved answer
+session is in context **100% of the time** while accuracy is only 0.333, which
+looks like the model ignoring available evidence. It is not.
+
+The decisive evidence is a tool-call record, stored verbatim:
+
+```
+[tool Edit] {"file_path": ".../sklearn/mixture/base.py", "old_string": "..."}
+[tool Read] {"file_path": ".../sklearn/mixture/base.py", "limit": 30}
+```
+
+`Edit` versus `Read` is exactly what the question asks, and it is present in the
+text. `scripts/diagnose_edit_signal.py` measures how often it survives into what we
+return, counting all three forms the evidence can take (the tool call, the
+`has been updated` result line, and the `diff --git` header):
+
+| measurement | value |
+|---|---|
+| answer session retrieved | 30/30 (100%) |
+| gold file appears anywhere in returned evidence | 20/20 (100%) |
+| gold file shown as *modified* in returned evidence | **6/20 (30%)** |
+| a distractor shown as modified (would make it ambiguous) | 0/20 (0%) |
+
+30% against a measured accuracy of 33.3% is the whole story: **the model answers
+correctly exactly when the line that settles the question survives our
+truncation.** The bottleneck is evidence selection, not recall and not the answer
+model. We retrieve the right session and then cut away the part that is useful.
+
+This is actionable. Our per-item window (~380 tokens) is chosen for token budget,
+not for what carries the answer, and in a long trajectory the decisive fragment is
+one line among thousands. Selecting windows by query-term density was a first step;
+what this measurement shows is that retrieval units need to be chosen so that
+*operative* content — the change actually made — is preferentially retained.
+
+An earlier version of this diagnostic searched for the file name as a substring and
+reported 45%, which was a false positive rate: an Edit payload's `old_string` can
+name other files. Parsing the `file_path` field and counting the three evidence
+forms is what made the number trustworthy.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
