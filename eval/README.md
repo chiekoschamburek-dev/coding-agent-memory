@@ -147,6 +147,66 @@ stage stays switchable. Settling it needs the end-to-end Answer/Eval harness
 of work, and listwise should be re-measured there before any decision to enable
 it.
 
+### End-to-end Answer evaluation
+
+Retrieval metrics show whether a session was found; the platform scores whether
+the returned memory let the answer model *solve the task*. `eval/run_endtoend.py`
+measures the second thing.
+
+**Design.** `eval/build_qa.py` builds 90 multiple-choice questions whose answers
+are objective — given the issue text, which file must be changed? The gold answer
+comes from the task's own patch, and distractors are files touched by *other*
+tasks in the same repository, so they are plausible rather than obviously wrong.
+Gold positions are balanced (17/23/23/27 across A–D), so position carries no
+signal. No judge is involved in scoring, which avoids the self-preference bias of
+one model answering and grading.
+
+Each question is answered twice: with no memory (the model's own prior) and with
+our retrieved memories supplied in returned rank order as a token-counted prefix,
+mirroring the platform. **Only the difference attributes anything to the memory
+system**, because absolute accuracy is dominated by what the model already knew.
+
+**Result: no detectable memory contribution.**
+
+| condition | n | accuracy | mean items shown |
+|---|---|---|---|
+| no memory | 90 | 0.689 | — |
+| memory, top_k=100 (wide context) | 90 | 0.689 | 67.4 |
+| memory, top_k=10 (tight context) | 90 | 0.700 | 10.0 |
+
+The wide condition moved 10 answers — **4 gained, 4 lost** — a net zero that
+McNemar's test cannot distinguish from chance (b=4, c=4, χ²=0.125, p=0.724). Tight
+context moved the result by +0.011, also negligible.
+
+The memory *was* reaching the model: every question received a non-empty context
+(mean 67 candidates at top_k=100), and 80 of 90 included a session that shares a
+file with the task's patch. So this is not a plumbing failure — it is a null
+result for this question type.
+
+**Why the null result is plausible, and its limits.** gpt-4o-mini already
+identifies the correct file 69% of the time from the issue text alone, so headroom
+is small; and file localisation is one facet of the task, one a strong model may
+match from prior knowledge of a well-known repository. A question type whose
+answer depends on session *content* rather than the file name would be more
+diagnostic, and would need generation plus a judge (a `Judge` class is included
+for that variant).
+
+**One suggestive pattern, explicitly not a conclusion.** In the wide condition the
+regression concentrated in the repository with the largest memory pool:
+
+| repository | sessions in pool | questions | Δ accuracy |
+|---|---|---|---|
+| django/django | 114 | 36 | −0.056 |
+| sympy/sympy | 77 | 26 | +0.000 |
+| scikit-learn | 23 | 10 | +0.100 |
+| matplotlib | 23 | 12 | +0.083 |
+
+This is consistent with the track's "relevant and noisy" premise — more same-repo
+memory means more opportunity for noise to distract. Tightening the context did
+**not** remove it (django stayed at −0.056 with 10 candidates instead of 67), so
+it is not purely context length. With n=36/12/10 these are small samples; treat it
+as a hypothesis to test at scale.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
@@ -154,6 +214,7 @@ it.
 | Cap items per session at 3 | Recall@100 rose 0.845 → 0.919 and nDCG@100 0.681 → 0.705. Without a cap, ~100 returned chunks collapsed to ~23 distinct sessions, starving other relevant work. |
 | Reject the optimum at cap=1 | cap=1 measured marginally better recall (0.9231 vs 0.9193) but the proxy scores *whether a session was found*, not *whether its content is enough to answer*. Optimizing a measurable proxy at the cost of an unmeasurable quality is how benchmarks get gamed; cap=3 keeps session context for a 0.4 % metric difference. |
 | Rerank weight 0.65, temperature 2.0 | Both swept. Weight: 0.65 peaks (MRR 0.7716); 0.85 and 0.95 degrade (0.7311, 0.7347) even though precision@10 rises — precision@10 is not what the answer model needs. |
+| End-to-end result reported as null, not as a win | 0.689 vs 0.689 with 4 gained / 4 lost and p=0.72 is indistinguishable from chance. Reporting the aggregate as anything other than "no detectable effect" would be reading noise, and the paired no-memory condition exists precisely to make that visible. |
 | Listwise reranking off by default | Every setting scored below the no-listwise configuration and cost ~5x search latency. See the table above; the attenuation signature shows it adds noise here, but the proxy measures file overlap rather than usefulness, so this is unresolved rather than settled. |
 | Dense enabled by default, device `auto` | The dense cost/benefit flips with hardware (see the table above). `auto` resolves to CUDA when present and CPU otherwise, so one image is fast on a GPU host and still contract-compliant on a CPU one, rather than being tuned for whichever machine happened to measure first. |
 | Rerank pool 120 | MRR 0.684 / 0.746 / 0.772 at top_n 30 / 60 / 120: larger is better, and on GPU the 120-pool costs 0.5 s per search, so there is no reason to shrink it. |
