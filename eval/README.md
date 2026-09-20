@@ -183,29 +183,51 @@ The memory *was* reaching the model: every question received a non-empty context
 file with the task's patch. So this is not a plumbing failure — it is a null
 result for this question type.
 
-**Why the null result is plausible, and its limits.** gpt-4o-mini already
-identifies the correct file 69% of the time from the issue text alone, so headroom
-is small; and file localisation is one facet of the task, one a strong model may
-match from prior knowledge of a well-known repository. A question type whose
-answer depends on session *content* rather than the file name would be more
-diagnostic, and would need generation plus a judge (a `Judge` class is included
-for that variant).
+**How the answer model locates the file without memory.** Measured, not assumed,
+because the initial explanation ("it knows the repository") turned out to be only
+half right:
 
-**One suggestive pattern, explicitly not a conclusion.** In the wide condition the
-regression concentrated in the repository with the largest memory pool:
+| mechanism | evidence |
+|---|---|
+| Vocabulary mapping: issue words → path words | A trivial lexical baseline (pick the option with the greatest token overlap with the issue) scores **0.500** against 0.250 random. |
+| Prior knowledge of well-known libraries | Asked why, the model answers in those terms: *"this file is responsible for model validation checks in Django, including detecting duplicate `db_table` settings"* (→ `django/core/checks/model_checks.py`), and *"the question discusses `BaseFormSet` and its `empty_form` ... located in `django/forms/formsets.py`"*. Both are library knowledge, not repository history. |
 
-| repository | sessions in pool | questions | Δ accuracy |
-|---|---|---|---|
-| django/django | 114 | 36 | −0.056 |
-| sympy/sympy | 77 | 26 | +0.000 |
-| scikit-learn | 23 | 10 | +0.100 |
-| matplotlib | 23 | 12 | +0.083 |
+The per-repository spread tracks how deeply each library is represented in
+pretraining: django 0.806, sympy 0.769, matplotlib 0.750 versus scikit-learn
+0.300. Literal mention of the answer in the issue explains a further slice
+(stem mentioned in 27.8% of questions: accuracy 0.840 there, 0.631 elsewhere).
 
-This is consistent with the track's "relevant and noisy" premise — more same-repo
-memory means more opportunity for noise to distract. Tightening the context did
-**not** remove it (django stayed at −0.056 with 10 candidates instead of 67), so
-it is not purely context length. With n=36/12/10 these are small samples; treat it
-as a hypothesis to test at scale.
+**Neither mechanism is something a memory system supplies.** That is a flaw in
+this question type: a file-location answer is largely derivable from the issue
+text, so there is little for retrieved experience to add.
+
+**The aggregate hides two opposing effects.** Splitting by whether the model
+would have got it right unaided is far more informative than the raw mean:
+
+| subset | n | no memory | with memory | delta |
+|---|---|---|---|---|
+| model already correct | 62 | 1.000 | 0.935 | **−0.065** |
+| model wrong without memory | 28 | 0.000 | 0.143 | **+0.143** |
+
+Memory *helps exactly where it should* — on questions the model cannot answer
+alone — and *hurts on questions it already handles*, by displacing correct
+reasoning with same-repository noise. Those effects cancel to 0.000 overall.
+With 4 questions in each direction, neither is statistically significant, so this
+is a directional finding, not a result.
+
+The actionable implication is a design constraint rather than a number: returned
+evidence must be gated hard enough that it cannot displace correct prior
+reasoning, while still surfacing when the model is otherwise stuck. That is
+precisely the "relevant versus noisy" tension the real track tests, and it is
+where the next iteration should focus.
+
+**What would actually settle it.** File localisation is too easy in the wrong way.
+A diagnostic question type needs an answer that is *not* derivable from the issue
+text — for example, asking how a specific past session handled a situation, where
+the answer is that session's approach. The definitive measure is producing real
+patches and running the SWE-bench test harness (`FAIL_TO_PASS` / `PASS_TO_PASS`),
+which needs repository checkouts and per-task Docker images; the infrastructure is
+in `benchmark/SWEContextBench/swebench_memory/harness/`.
 
 ### Tuning decisions taken from measurements, not intuition
 
