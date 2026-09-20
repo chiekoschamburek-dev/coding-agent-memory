@@ -86,6 +86,14 @@ class Settings:
     # other relevant prior work never got a slot. Coverage depends on session
     # diversity, because a task is answered from a session, not from one chunk.
     max_evidence_per_session: int = 3
+    # Weight given to "operative" lines (what a session DID) relative to query-term
+    # matches when choosing a verbatim window from a long memory. An engineering
+    # trajectory records its actions as tool calls and diffs, and those lines are
+    # JSON or patch syntax, so they overlap the issue wording poorly and are
+    # systematically skipped by term-density selection alone. Measured: the
+    # decisive line survived into the returned window only 30% of the time while
+    # the session itself was retrieved 100% of the time.
+    evidence_operative_weight: float = 1.0
     # Total budget for the whole `data` payload (platform input window minus
     # answer/safety reservation; kept well under 117_760 on purpose).
     evidence_budget_tokens: int = 60_000
@@ -225,6 +233,10 @@ class Settings:
         put("max_chunk_tokens", _env_int("CODEMEM_MAX_CHUNK_TOKENS", 1400))
         put("hard_chunk_chars", _env_int("CODEMEM_HARD_CHUNK_CHARS", 24_000))
         put("evidence_full_count", _env_int("CODEMEM_EVIDENCE_FULL_COUNT", 8))
+        put(
+            "evidence_operative_weight",
+            _env_float("CODEMEM_EVIDENCE_OPERATIVE_WEIGHT", 1.0),
+        )
         put(
             "max_evidence_per_session",
             _env_int("CODEMEM_MAX_EVIDENCE_PER_SESSION", 3),

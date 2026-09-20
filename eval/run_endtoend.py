@@ -195,7 +195,17 @@ def run_condition(
     budget_tokens: int,
     top_k: int,
     progress_every: int = 10,
+    repeats: int = 1,
 ) -> dict:
+    """Run every question, optionally repeating each one.
+
+    Repeats exist because a non-deterministic answer model turns a single pass
+    into a coin flip on borderline questions. Measured on one question at
+    temperature=0: 4 "B" and 4 "C" in eight identical calls, and an explicit
+    ``seed`` did not stabilise it. Reporting one pass would therefore present
+    noise as a result; the caller gets the per-pass spread *and* a majority vote,
+    which is the better estimator of what the model "really" thinks.
+    """
     """Run every question under one condition and return per-question outcomes."""
     from fastapi.testclient import TestClient
 
@@ -260,9 +270,22 @@ def run_condition(
                     answer_session and answer_session in shown_sessions
                 )
 
-            choice, raw = answerer.answer(
-                question["question"], question["options"], context
-            )
+            votes: list[int | None] = []
+            raws: list[str] = []
+            for _ in range(max(1, repeats)):
+                choice, raw = answerer.answer(
+                    question["question"], question["options"], context
+                )
+                votes.append(choice)
+                raws.append(raw)
+
+            # Majority vote over the repeats; ties resolve to the first vote.
+            tally: dict[int, int] = {}
+            for vote in votes:
+                if vote is not None:
+                    tally[vote] = tally.get(vote, 0) + 1
+            choice = max(tally, key=lambda k: (tally[k], -votes.index(k))) if tally else None
+            raw = raws[0]
             outcomes.append(
                 {
                     "query_id": question["query_id"],
@@ -270,6 +293,9 @@ def run_condition(
                     "gold_index": question["gold_index"],
                     "chosen_index": choice,
                     "correct": choice == question["gold_index"],
+                    "unanimous": len(tally) <= 1,
+                    "votes": votes,
+                    "votes_correct": [v == question["gold_index"] for v in votes],
                     "parsed": choice is not None,
                     "n_shown": n_shown,
                     "n_relevant_shown": n_relevant_shown,
@@ -281,10 +307,19 @@ def run_condition(
                 acc = sum(o["correct"] for o in outcomes) / len(outcomes)
                 print(f"    {label}: {i}/{len(questions)} acc={acc:.3f}", flush=True)
 
+    per_pass = [
+        sum(o["votes_correct"][i] for o in outcomes) / len(outcomes)
+        for i in range(max(1, repeats))
+    ]
     return {
         "label": label,
         "n": len(outcomes),
+        "repeats": max(1, repeats),
         "accuracy": sum(o["correct"] for o in outcomes) / len(outcomes),
+        "per_pass_accuracy": per_pass,
+        "per_pass_min": min(per_pass),
+        "per_pass_max": max(per_pass),
+        "unanimous_rate": sum(o["unanimous"] for o in outcomes) / len(outcomes),
         "unparsed_rate": sum(not o["parsed"] for o in outcomes) / len(outcomes),
         "outcomes": outcomes,
     }
@@ -321,13 +356,18 @@ def report(results: dict[str, dict], meta: dict) -> None:
     print("End-to-end Answer evaluation (file localisation, multiple choice)")
     print("=" * 70)
 
-    print(f"{'condition':<20}{'n':>5}{'accuracy':>11}{'unparsed':>11}")
-    print("-" * 47)
+    print(f"{'condition':<20}{'n':>5}{'majority':>10}{'per-pass range':>18}{'unanimous':>11}")
+    print("-" * 64)
     for label, result in results.items():
+        spread = f"{result.get('per_pass_min', result['accuracy']):.3f}-{result.get('per_pass_max', result['accuracy']):.3f}"
         print(
-            f"{label:<20}{result['n']:>5}{result['accuracy']:>11.3f}"
-            f"{result['unparsed_rate']:>11.3f}"
+            f"{label:<20}{result['n']:>5}{result['accuracy']:>10.3f}"
+            f"{spread:>18}{result.get('unanimous_rate', 1.0):>11.3f}"
         )
+    print()
+    print("  'majority' aggregates repeats per question; 'per-pass range' is the")
+    print("  spread across individual passes. A wide range means the answer model is")
+    print("  not deterministic and single-pass numbers would be noise.")
 
     if "no_memory" in results and "with_memory" in results:
         base = results["no_memory"]["accuracy"]
@@ -390,6 +430,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dense-enabled", default=None)
     parser.add_argument("--rerank-enabled", default=None)
     parser.add_argument("--listwise-enabled", default=None)
+    parser.add_argument("--item-tokens", type=int, default=None,
+                        help="cap for items rendered in full form")
+    parser.add_argument("--ptr-tokens", type=int, default=None,
+                        help="cap for the remaining (pointer-form) items")
+    parser.add_argument("--full-count", type=int, default=None,
+                        help="how many items use the full-form cap")
+    parser.add_argument("--budget", type=int, default=None,
+                        help="override the total evidence token budget")
+    parser.add_argument("--operative-weight", type=float, default=None,
+                        help="weight for operative lines when selecting a window")
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="answer each question N times and majority-vote")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -443,8 +495,20 @@ def main(argv: list[str] | None = None) -> int:
         overrides["dense_enabled"] = args.dense_enabled.lower() == "true"
     if args.rerank_enabled is not None:
         overrides["rerank_enabled"] = args.rerank_enabled.lower() == "true"
+    if args.item_tokens is not None:
+        overrides["evidence_item_tokens"] = args.item_tokens
+    if args.ptr_tokens is not None:
+        overrides["evidence_ptr_tokens"] = args.ptr_tokens
+    if args.full_count is not None:
+        overrides["evidence_full_count"] = args.full_count
+    if args.budget is not None:
+        overrides["evidence_budget_tokens"] = args.budget
+    if args.operative_weight is not None:
+        overrides["evidence_operative_weight"] = args.operative_weight
     if args.listwise_enabled is not None:
         overrides["listwise_enabled"] = args.listwise_enabled.lower() == "true"
+    if args.budget_tokens:
+        overrides["evidence_budget_tokens"] = args.budget_tokens
     overrides.setdefault("listwise_enabled", os.environ.get("CODEMEM_LISTWISE_ENABLED", "false").lower() == "true")
     overrides.setdefault("llm_base_url", base_url)
     overrides.setdefault("llm_api_key", api_key)
@@ -483,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
             budget_tokens=args.budget_tokens,
             top_k=args.top_k,
             progress_every=0 if args.quiet else 10,
+            repeats=args.repeats,
         )
 
     report(results, qa.get("meta", {}))

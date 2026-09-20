@@ -13,6 +13,34 @@ envelope, authentication, isolation, idempotency, and concurrency.
 pytest -q
 ```
 
+## Scope: what we are graded on
+
+The rules assign **Add and Search to us** and **Answer, Eval and publication to the
+platform**, which uses its own locked answer model and prompt. The submission is
+four things, all on our side of that line:
+
+1. **recall** — find the prior sessions that matter;
+2. **denoise** — drop what does not, rather than padding the token prefix;
+3. **rank** — order by usefulness, since the platform consumes a token-counted
+   prefix in our order;
+4. **content selection** — decide what text each returned item carries, because
+   the contract says ``data[].content`` enters Answer in the returned order.
+
+Point 4 is easy to overlook and it is where the largest measured loss sits. It is
+also entirely ours, and — unlike answer accuracy — **fully measurable without any
+model in the loop**.
+
+### Two things that are NOT ours, and why they were dropped from tuning
+
+Measuring answer accuracy locally evaluates the platform's half with a model that
+is not the platform's. It is also unreliable: on our relay, one prompt at
+``temperature=0`` returned "B" four times and "C" four times out of eight, and an
+explicit ``seed`` did not stabilise it (6/2 and 2/6 across variants). A single-pass
+accuracy number from such an endpoint is a coin flip.
+
+Those numbers are retained in this document only as case studies. **All tuning is
+done against deterministic metrics**, which either move or do not.
+
 ## 2. Proxy retrieval benchmark (`eval/`)
 
 **CAMBench Coding — the scored suite — is not public.** We therefore build a
@@ -147,7 +175,11 @@ stage stays switchable. Settling it needs the end-to-end Answer/Eval harness
 of work, and listwise should be re-measured there before any decision to enable
 it.
 
-### End-to-end Answer evaluation
+### End-to-end Answer evaluation (case study, not a tuning signal)
+
+> Superseded for tuning by the deterministic metric above. Kept because it is
+> how the content-selection problem was found, and because the same harness is the
+> right tool once the platform's own Answer and Eval run.
 
 Retrieval metrics show whether a session was found; the platform scores whether
 the returned memory let the answer model *solve the task*. `eval/run_endtoend.py`
@@ -270,6 +302,56 @@ An earlier version of this diagnostic searched for the file name as a substring 
 reported 45%, which was a false positive rate: an Edit payload's `old_string` can
 name other files. Parsing the `file_path` field and counting the three evidence
 forms is what made the number trustworthy.
+
+### Evidence sufficiency: the deterministic metric to tune against
+
+`eval/run_evidence.py` measures what our Search output actually carries, with no
+model in the loop. For each question it parses the returned content and asks:
+
+| metric | meaning |
+|---|---|
+| answer session retrieved | did recall find the right session at all |
+| decisive evidence present | does the returned content show the **operative** action for the gold artifact (a tool call, an update notice, or a diff header) |
+| ambiguous | does such a marker also appear for a distractor, so the evidence cannot settle the question |
+| **decidable** | decisive present **and** not ambiguous — the number to raise |
+
+Everything is string parsing, so it is reproducible, fast and free. Baseline:
+
+| metric | value |
+|---|---|
+| answer session retrieved | **1.000** |
+| decisive evidence present | 0.500 |
+| ambiguous | 0.367 |
+| **decidable** | **0.300** |
+
+Two things follow. **Recall is not the problem** — the right session is in context
+every time, which is why adding more retrieval channels would be wasted effort.
+The losses are entirely in what we return: half the time the decisive line is cut
+away, and in more than a third of cases evidence from *another* session makes a
+distractor look modified too.
+
+`decidable` = 0.300 agrees with the non-deterministic answer accuracy measured
+earlier (0.333), which is the validation that it measures the same thing — while
+being reproducible.
+
+**Operative weighting, swept on the deterministic metric:**
+
+| `evidence_operative_weight` | decisive | ambiguous | decidable |
+|---|---|---|---|
+| 0.0 (query terms only) | 0.467 | 0.333 | 0.233 |
+| **1.0 (default)** | 0.500 | 0.367 | **0.300** |
+| 3.0 | 0.500 | 0.467 | 0.200 |
+
+The mechanism is coherent: weighting operative lines pulls in **all** edit markers,
+including ones belonging to *other* sessions that touch a distractor, so beyond
+1.0 the ambiguity it introduces outweighs the decisive evidence it recovers. The
+default of 1.0 is the best of the three tested.
+
+**Ambiguity is now the dominant error mode (0.367).** That is the next thing to
+attack: our returned items mix evidence from many sessions with no way for the
+reader to tell which session a marker belongs to, so another session's edit can
+contradict the answer. n=30 means one question is 0.033, so these differences are
+directions with a mechanism, not established effects.
 
 ### Tuning decisions taken from measurements, not intuition
 

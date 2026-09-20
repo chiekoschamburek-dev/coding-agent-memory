@@ -21,6 +21,8 @@ truncating the strongest evidence.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -183,7 +185,35 @@ def _iso_from_ms(value: int | None) -> str | None:
         return None
 
 
-def _select_span(text: str, budget_tokens: int, query_terms: Sequence[str]) -> tuple[str, bool]:
+# Lines that record what a session DID, rather than what it discussed. These are
+# the highest-value evidence in an engineering trajectory, and they are written as
+# tool-call JSON or patch syntax, so they match the issue wording poorly and are
+# skipped by term-density selection alone.
+# Unambiguous markers only. A generic "^[+-]" rule was tried and dropped: diff
+# bodies indent after the sign ("+        code"), so it missed real diff lines
+# while matching markdown bullets ("- item"). Locating a diff by its headers is
+# enough, because a window is a contiguous span and the changed lines come with
+# the header that pulled the window there.
+_OPERATIVE_RES = (
+    re.compile(r"\[tool (?:Edit|Write|MultiEdit|NotebookEdit)\]"),
+    re.compile(r"^diff --git "),
+    re.compile(r"^\+\+\+ b/"),
+    re.compile(r"^--- a/"),
+    re.compile(r"^@@ "),
+    re.compile(r"has been updated"),
+)
+
+
+def _operative_score(line: str) -> int:
+    return sum(1 for pattern in _OPERATIVE_RES if pattern.search(line))
+
+
+def _select_span(
+    text: str,
+    budget_tokens: int,
+    query_terms: Sequence[str],
+    operative_weight: float = 0.0,
+) -> tuple[str, bool]:
     """Choose a verbatim, line-aligned span of ``text`` within the token budget.
 
     Returns ``(span, truncated)``.
@@ -222,6 +252,11 @@ def _select_span(text: str, budget_tokens: int, query_terms: Sequence[str]) -> t
             if cost > budget_tokens:
                 break
             score += sum(1 for term in terms if term in lowered[end])
+            if operative_weight:
+                # What the session changed is worth more than what it said: an
+                # edit or a diff line is the answer to "how was this handled",
+                # while surrounding prose often restates the issue.
+                score += operative_weight * _operative_score(lines[end])
             end += 1
         # Strict '>' keeps the earliest window on a tie.
         if end > start and score > best_score:
@@ -306,7 +341,12 @@ def assemble(
         # verbatim for audit, and the schema's example is plain remembered text.
         # Identifiers live in the index as retrieval keys, not in the payload,
         # and the source timestamp belongs in `created_at`, not in the text.
-        content, truncated = _select_span(body_source, budget_for_item, plan.keywords)
+        content, truncated = _select_span(
+            body_source,
+            budget_for_item,
+            plan.keywords,
+            settings.evidence_operative_weight,
+        )
         stamped = _iso_from_ms(memory.ts)
 
         # Repeated text across sessions adds no new evidence but would consume
