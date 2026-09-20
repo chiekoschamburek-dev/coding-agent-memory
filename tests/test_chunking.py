@@ -14,6 +14,7 @@ from codemem.add.chunker import (
     LOG,
     PROSE,
     STACKTRACE,
+    TEST,
     chunk_content,
 )
 from codemem.add.entities import extract_entities
@@ -81,6 +82,76 @@ def test_diff_is_kept_whole():
     assert "--- a/src/parser/tokenizer.py" in text
     assert "@@ -139,6 +139,8 @@" in text
     assert "+        if not self.buffer:" in text
+
+
+def test_markdown_bullets_are_not_a_diff():
+    # "+"/"-" begin a bullet just as they begin a changed line, so a diff is
+    # only a diff when it announces itself with a header.
+    content = (
+        "What I verified:\n\n"
+        "- The handler exists\n"
+        "- The method is async\n"
+        "- The subclass can call it\n"
+        "- The test passes\n"
+    )
+    assert DIFF not in _kinds(content)
+
+
+def test_unfenced_diff_with_headers_is_still_diff():
+    content = (
+        "--- a/src/parser/tokenizer.py\n"
+        "+++ b/src/parser/tokenizer.py\n"
+        "@@ -139,6 +139,8 @@ class Tokenizer:\n"
+        "-        return self.buffer.pop(0)\n"
+        "+        if not self.buffer:\n"
+        "+            return None\n"
+    )
+    assert DIFF in _kinds(content)
+
+
+def test_indented_prose_is_not_config():
+    # An issue description carries `key: value` lines, but it opens with a
+    # sentence and its values are prose. Labelling it config also gave it a
+    # `yaml` lang and unlocked the codeish entity extractors.
+    content = (
+        "Fix this bug to solve the issue based on manual.yaml:\n"
+        "  instance_id: django__django-12915\n"
+        "  repo: django/django\n"
+        "  base_commit: 4652f1f0aa459a7b980441d629648707c32e36bf\n"
+        "  problem_statement: Add get_response_async to the static files handler\n"
+        "  so that ASGI applications stop falling back to the sync path\n"
+    )
+    chunks = chunk_content(content)
+    assert [c.kind for c in chunks] == [PROSE]
+    assert chunks[0].lang is None
+
+
+def test_fenced_test_output_is_detected_without_a_language_tag():
+    content = (
+        "```\n"
+        "============================= test session starts ==============================\n"
+        "platform linux -- Python 3.11.2, pytest-8.3.5\n"
+        "tests/test_tokenizer.py::test_unicode_bom PASSED                       [ 50%]\n"
+        "tests/test_tokenizer.py::test_empty_buffer FAILED                      [100%]\n"
+        "========================= 1 failed, 1 passed in 0.21s =========================\n"
+        "```\n"
+    )
+    assert TEST in _kinds(content)
+
+
+def test_fenced_test_source_stays_code():
+    content = (
+        "```python\n"
+        "def test_read_token_guards_empty_buffer():\n"
+        "    assert tokenizer.read_token() is None\n"
+        "\n"
+        "def test_read_token_consumes_buffer():\n"
+        "    assert tokenizer.read_token() == 'x'\n"
+        "```\n"
+    )
+    kinds = _kinds(content)
+    assert CODE in kinds
+    assert TEST not in kinds
 
 
 def test_log_block_detected():

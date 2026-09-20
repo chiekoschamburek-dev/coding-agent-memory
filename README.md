@@ -143,6 +143,7 @@ they are how the tuning decisions were made rather than guessed:
 
 | Script | Answers |
 |---|---|
+| `audit_chunk_kinds.py` | which chunk kinds actually occur on real trajectories, and how many of those labels look wrong |
 | `characterize_gate.py` | which queries the noise gate admits, with one memory |
 | `characterize_gate_corpus.py` | the same, but against hundreds of same-repo distractors, reporting the relevant memory's *rank* |
 | `diagnose_lexical.py` | per-term document frequency and which candidates beat the relevant one |

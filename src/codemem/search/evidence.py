@@ -43,6 +43,11 @@ from .retriever import (
 )
 
 # Which structural kinds a question most likely needs, keyed by detected intent.
+# Adding "code" to the debug table was tried and measured worse on what the
+# answer model actually reads (recall@10 0.7214 -> 0.7115, mean prefix
+# `decidable` 0.408 -> 0.383; only MRR rose). Code is 81% of this corpus's
+# chunks, so a kind-level bonus cannot isolate the tool-call records it was
+# meant to favour -- that discriminator has to be per line.
 INTENT_KIND_BONUS: dict[str, dict[str, float]] = {
     "debug": {"stacktrace": 1.18, "diff": 1.15, "test": 1.10, "log": 1.08, "cmd": 1.04},
     "develop": {"diff": 1.18, "code": 1.12, "prose": 1.06, "test": 1.05},

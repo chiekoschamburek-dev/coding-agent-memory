@@ -72,7 +72,28 @@ _TEST_HINT_RE = re.compile(
     r"PASSED|FAILED|ERRORS?|passed|failed|xfail|pytest|jest|junit|"
     r"FAIL_TO_PASS|PASS_TO_PASS)\b"
 )
+# A test *run* artefact, as opposed to source code that happens to mention a
+# test. ``test_hint`` alone matches pip and install chatter, so the fenced rule
+# below requires one of these markers as well.
+_TEST_RESULT_RE = re.compile(
+    r"(test session starts|passed|failed|xfail|no tests ran|"
+    r"short test summary|={5,}|PASSED|FAILED|ERROR)"
+)
 _SHELL_PREFIX_RE = re.compile(r"^\s*(\$|>|>>>)\s+")
+
+# A configuration value is a token, a path, a number or a quoted string. Held to
+# a few words so that an indented ``problem_statement: <sentence>`` block, which
+# is issue prose, does not read as config.
+_MAX_CONFIG_VALUE_WORDS = 8
+_CONFIG_ASSIGN_RE = re.compile(r"^\s*\"?([\w.\-\"\[\]]+)\"?\s*[:=]\s*(.*)$")
+_CONFIG_OTHER_RE = re.compile(
+    r"^\s*("
+    r"\[[\w.\-]+\]\s*$"      # [section]
+    r"|[{}]\s*$"             # a brace on its own line
+    r"|[\w.\-]+\s*\{\s*$"    # nginx/hcl style block opener
+    r"|[#;]\s*\S"            # comment line
+    r")"
+)
 
 _LANG_BY_EXT = {
     "py": "python", "pyi": "python", "js": "javascript", "mjs": "javascript",
@@ -110,6 +131,33 @@ class Chunk:
 # ------------------------------------------------------------------ scan ----
 
 
+def _config_line(line: str) -> bool:
+    """True for a line that assigns a short value, or is config scaffolding."""
+    if _CONFIG_OTHER_RE.match(line):
+        return True
+    match = _CONFIG_ASSIGN_RE.match(line)
+    if not match:
+        return False
+    value = match.group(2).strip()
+    return bool(value) and len(value.split()) <= _MAX_CONFIG_VALUE_WORDS
+
+
+def _is_config_block(body: list[str], text: str) -> bool:
+    """Most lines assign values, and the block opens with one.
+
+    The opening-line test is what separates configuration from prose that
+    contains indented ``key: value`` lines: a config file starts with a key, a
+    section or a comment, whereas an issue description starts with a sentence.
+    """
+    if _JSONISH_RE.match(text):
+        return True
+    if _TEST_HINT_RE.search(text):
+        return False
+    if not _config_line(body[0]):
+        return False
+    return sum(1 for line in body if _config_line(line)) / len(body) >= 0.6
+
+
 def _classify_unfenced(lines: list[str]) -> str:
     """Classify a run of non-fenced lines."""
     body = [ln for ln in lines if ln.strip()]
@@ -119,7 +167,12 @@ def _classify_unfenced(lines: list[str]) -> str:
     def ratio(pred) -> float:
         return sum(1 for ln in body if pred(ln)) / len(body)
 
-    if ratio(lambda ln: bool(_DIFF_HEADER_RE.match(ln)) or ln.startswith(("+", "-"))) >= 0.5:
+    # A real diff announces itself with a header. Counting bare "+"/"-" lines is
+    # not enough: markdown bullets and numbered steps start the same way, which
+    # labelled 43% of this corpus's "diff" chunks as diffs that contain no
+    # hunk at all (see scripts/audit_chunk_kinds.py).
+    changed = sum(1 for ln in body if ln.startswith(("+", "-")))
+    if changed >= 2 and any(_DIFF_HEADER_RE.match(ln) for ln in body):
         return DIFF
     if ratio(lambda ln: bool(_TRACEBACK_RE.match(ln) or _EXC_TAIL_RE.match(ln))) >= 0.4:
         return STACKTRACE
@@ -128,10 +181,8 @@ def _classify_unfenced(lines: list[str]) -> str:
     if ratio(lambda ln: bool(_CMD_LINE_RE.match(ln))) >= 0.6:
         return CMD
     text = "\n".join(lines)
-    if len(body) >= 3 and _CONFIG_HINT_RE.findall(text):
-        if ratio(lambda ln: bool(_CONFIG_HINT_RE.match(ln))) >= 0.6 or _JSONISH_RE.match(text):
-            if not _TEST_HINT_RE.search(text):
-                return CONFIG
+    if len(body) >= 3 and _CONFIG_HINT_RE.findall(text) and _is_config_block(body, text):
+        return CONFIG
     # A single prose sentence that happens to mention "pytest" is not a test
     # artefact, so require at least two lines before promoting to TEST.
     if len(body) >= 2 and _TEST_HINT_RE.search(text) and ratio(
@@ -251,6 +302,16 @@ def _classify_fenced(inner: str, lang: str | None) -> str:
         cmds = sum(1 for ln in body if _CMD_LINE_RE.match(ln) or _SHELL_PREFIX_RE.match(ln))
         if cmds / len(body) >= 0.6:
             return CMD
+        # Test *output* also arrives inside an unlabeled fence, where the
+        # language-based branches below can never reach it. Half the lines must
+        # look test-related and at least one must record a run result, so test
+        # source stays code and pip chatter stays code.
+        if (
+            len(body) >= 2
+            and sum(1 for ln in body if _TEST_HINT_RE.search(ln)) / len(body) >= 0.5
+            and any(_TEST_RESULT_RE.search(ln) for ln in body)
+        ):
+            return TEST
     if lang in {"json", "yaml", "yml", "toml", "ini", "cfg", "xml", "properties", "env"}:
         return CONFIG
     if lang in {"bash", "sh", "shell", "zsh", "console", "ps1", "powershell", "text"}:

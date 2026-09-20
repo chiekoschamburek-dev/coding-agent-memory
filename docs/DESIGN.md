@@ -44,7 +44,22 @@ Structure-aware pieces of a message. Segmentation runs in this order:
 3. outside fences, group blank-line-separated paragraphs, then split again so a
    `diff --git` header starts its own segment;
 4. classify each segment as prose, code, diff, log, stacktrace, cmd, config, or
-   test;
+   test. Three of those rules were tightened against the corpus rather than by
+   reasoning (`scripts/audit_chunk_kinds.py` reports the distribution and the
+   suspect labels):
+   * a segment is a **diff** only if a diff header is present, not merely
+     because half its lines start with `+`/`-`. Markdown bullets and numbered
+     steps begin the same way, and 43% of the chunks labelled `diff` contained
+     no hunk at all;
+   * a segment is **config** only if it opens with a key, section, comment or
+     brace and its values are short. An issue description with indented
+     `problem_statement: …` lines otherwise reads as configuration — 95% of the
+     `config` chunks were the task prompt, which also mis-set their `lang` to
+     `yaml` and unlocked the aggressive symbol/command extractors on prose;
+   * **test output inside an unlabeled fence** is recognised by content (at
+     least half test-shaped lines plus one test-run marker). 99.2% of this
+     corpus's fences carry no language tag, so the language-based branches could
+     never reach it and every such block fell through to `code`.
 5. pack prose paragraphs up to a token target; keep structural segments whole;
 6. only split on line boundaries when a segment exceeds the cap, and hard-cut by
    characters solely for a single pathological line.

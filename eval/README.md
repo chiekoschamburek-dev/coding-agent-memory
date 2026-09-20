@@ -491,6 +491,72 @@ dominant error mode — is 7x lower in the compact payload. The decision to leav
 `evidence_max_sessions=0` should be re-tested against an end-to-end Answer run
 before it is treated as settled.
 
+### Chunk kind labels, audited against the corpus
+
+The chunker labels every segment as one of eight structural kinds, and the label
+is load-bearing: it selects the intent/kind scoring bonus and it decides whether
+the aggressive symbol/command/package entity extractors run on that text
+(`code/diff/stacktrace/test/config` are "codeish", prose is not). Nothing so far
+checked whether those eight kinds actually occur, or occur *correctly*, on real
+trajectories. `scripts/audit_chunk_kinds.py` does: it runs the shipped chunker
+over `eval/data/benchmark.json` (300 sessions, 34 186 messages, 486 049 lines,
+37 703 chunks) and reports the distribution plus two suspect-label counts.
+
+Why the distribution is lopsided is visible in the same run: **83.2% of corpus
+lines sit inside code fences and 61 035 of 61 523 fences (99.2%) carry no
+language tag**, so the language-driven branches of the fenced classifier almost
+never fire and unlabeled blocks fall through to `code`.
+
+| kind | before | after | what changed |
+|---|---|---|---|
+| `code` | 30 224 (80.2%) | 30 101 (81.5%) | absorbs nothing new; still the bulk |
+| `prose` | 5 046 | 4 970 | net of gaining mislabelled lists and prompts, losing packed boundaries |
+| `diff` | 1 103 | 646 | 475 chunks had **no diff header at all** — markdown bullets start with `-`, so they counted as changed lines |
+| `stacktrace` | 990 | 990 | unchanged |
+| `config` | 262 | 10 | **249 were the task prompt** (`instance_id:`, `problem_statement: <sentence>`), which also mis-set their `lang` to `yaml` (250 → 5) and switched on codeish entity extraction over issue prose |
+| `test` | 38 | 172 | pytest output inside unlabeled fences is now recognised by content (a run marker plus ≥50% test-shaped lines); test *source* still stays `code` |
+| `cmd` | 38 | 38 | unchanged; 14 of them (37%) still open with a whitelisted command word rather than a shell prompt — left alone, 38 chunks cannot justify the risk |
+| `log` | 2 | 2 | the corpus genuinely has almost no timestamped log burst — only 12 fenced blocks reach a 50% log-line ratio in the first place. This kind is rare here, not mislabelled |
+
+All eight kinds do occur, so no rule is dead code — but four of them
+(`test`, `cmd`, `config`, `log`) were either nearly empty or mostly wrong, and
+`config` was the worst: 95% of its chunks were one mislabelled artefact repeated
+across sessions.
+
+**The metrics did not reward this.** Measured on the same machine with the same
+deterministic configuration (dense and rerank unavailable, so the P1 path):
+
+| | baseline | chunker fix | chunker + `code` bonus |
+|---|---|---|---|
+| MRR | 0.7800 | 0.7736 | 0.7778 |
+| nDCG@10 | 0.6686 | 0.6611 | 0.6566 |
+| recall@10 | 0.7186 | 0.7214 | 0.7115 |
+| precision@10 | 0.2242 | 0.2323 | 0.2267 |
+| `decidable`, unlimited row | 0.367 | 0.400 | 0.400 |
+| `decidable`, mean of prefix rows | 0.417 | 0.408 | 0.383 |
+
+The chunker change is flat-to-mixed: `recall@10` and `precision@10` improve,
+`nDCG@10` and MRR slip by less than one query's worth, and on a 30-question set
+every `decidable` difference is 1–2 questions. It was kept anyway, on the ground
+that a mislabelled chunk is an index defect rather than a tuning knob — it changes
+which entity extractors run, and the proxy's file-overlap truth cannot price
+that. Two things to re-test if this is revisited: whether `prose` deserves a
+debug bonus (the demoted lists and prompts *are* the sessions' own summaries of
+what they changed), and whether the corpus is simply too small to resolve
+label-quality effects at all.
+
+The speculative part was the `code` entry in the debug intent table, motivated by
+operative evidence living in `code` chunks (2 869 of the 3 464 chunks carrying an
+operative line, versus 594 in `diff`). It cost the metrics that decide what the
+answer model reads — recall@10 0.7214 → 0.7115, precision@10 0.2323 → 0.2267, and
+the mean across the four prefix `decidable` rows 0.408 → 0.383 (three of four
+budgets down, 8 000 tokens flat) — while only MRR improved, 0.7736 → 0.7778. The
+reason is structural: `code` is 81% of the corpus, so a kind-level weight cannot
+isolate a 9% minority inside it. **Dropped.** Whatever promotes operative evidence
+has to read the chunk's lines, not its label — which is what
+`evidence_operative_weight` already does for span selection and has not yet been
+tried for ranking.
+
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
@@ -508,6 +574,8 @@ before it is treated as settled.
 | Promote the operative chunk, but only within the top session | Promoting it in every session raised decisive evidence 0.500 → 0.667 and ambiguity 0.367 → 0.567 simultaneously, netting *below* baseline. Restricted to the session we already rank first it gained on all three axes (0.567 / 0.333 / 0.333). The same lever applied everywhere is the same lever applied to evidence we do not believe. |
 | Do not cap distinct sessions (`evidence_max_sessions=0`) | The prediction was that tightening the cap buys precision with coverage we could spare, since the answer session was retrieved 100% of the time. Wrong: it is in the payload 100% of the time but is the *top-ranked* session only 70% of the time, so `decidable` stayed flat while decisive fell. What actually needs work is session ranking, not assembly breadth. **Under the prefix metric this is now much less clear** — `max_sessions=1` scores the same `decidable` at 676 tokens instead of 6 518; see the section above. Re-test before treating this as settled. |
 | Session-major assembly is free on the retrieval proxy | MRR 0.7800 and recall@10 0.7186 unchanged, nDCG@100 0.7306 → 0.7368, items 67 → 59. File-overlap ground truth cannot distinguish which chunk of a session leads, so a change that only affects chunk *identity* inside a session shows up as no cost. |
+| Chunk kind labels tightened against the corpus audit | 95% of `config` chunks were the task prompt and 43% of `diff` chunks had no hunk at all (`scripts/audit_chunk_kinds.py`). Kept on index-correctness grounds: the flat-to-mixed metric movement (recall@10 +0.0028, nDCG@10 −0.0075) is within one query, and the label decides which entity extractors run, which file overlap cannot price. |
+| No `code` bonus for debug intent | Operative evidence is concentrated in `code` chunks (2 869 of 3 464), but weighting the kind cost recall@10 (0.7214 → 0.7115), precision@10 (0.2323 → 0.2267) and mean prefix `decidable` (0.408 → 0.383) while only MRR rose. A kind label cannot isolate a 9% minority inside it. |
 
 ### What this benchmark cannot tell us
 
