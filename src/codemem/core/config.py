@@ -77,7 +77,15 @@ class Settings:
 
     # ---- evidence assembly --------------------------------------------
     evidence_full_count: int = 8  # items rendered in full form
-    evidence_item_tokens: int = 380  # cap for a full-form item
+    # Cap for a full-form item. Raised from 380 after measuring evidence
+    # sufficiency (`eval/run_evidence.py`, n=30): the decisive line survived
+    # into the returned window 0.700 of the time at 380 and 0.800 at 600 and
+    # above, and 800 is the peak for `decidable` (0.433 → 0.567 at a 4k-token
+    # prefix) with no question losing evidence (paired: +3 decisive / −0,
+    # +2 decidable / −0) for +9.8 % payload tokens. 1200 is no better and
+    # raises ambiguity. The ranking metrics are bit-identical across this
+    # range — only the text each item carries changes.
+    evidence_item_tokens: int = 800  # cap for a full-form item
     evidence_ptr_tokens: int = 110  # cap for a pointer-form item
     evidence_excerpt_chars: int = 900
     # Cap on items returned from one session. A session yields many chunks, and
@@ -217,6 +225,34 @@ class Settings:
     # Cross-encoder context cap. Memory chunks can be long; truncating keeps
     # per-pair cost bounded.
     rerank_max_chars: int = 2000
+    # ---- session-major assembly -----------------------------------------
+    # One session averages ~96 memory entries on the proxy corpus (28 675
+    # entries over 300 sessions), so every entry-counted quota above is much
+    # smaller than it reads: candidate_pool 300 spans ~3 sessions and
+    # rerank_top_n 120 only ~1.3. These two make the pool session-major —
+    # recall deeper per channel, then keep at most N entries per session before
+    # truncating to candidate_pool. 0 disables both and restores the legacy
+    # entry-major pool.
+    #
+    # Measured on the proxy benchmark and left off: MRR +0.019 (p=0.25) against
+    # item recall@10 −0.019 (p=0.25) — noise in both directions. It does widen
+    # the payload, but candidate generation was already shown not to be the
+    # constraint (pool 300 → 800 moved nothing), and a session that now holds
+    # three pool slots costs entry-window coverage. See eval/README.md.
+    candidate_per_session: int = 0
+    recall_channel_depth: int = 0  # 0 = use recall_per_channel
+    # Score one representative document per session instead of one per entry,
+    # so the cross-encoder budget distinguishes sessions — the unit the
+    # platform consumes — rather than re-ordering chunks inside the one or two
+    # sessions an entry-major pool happens to contain.
+    #
+    # Measured and left off: every metric sat below the entry-level stage
+    # (MRR −0.059, p=0.006) and lowering the blend weight drifted monotonically
+    # back toward the baseline — the signature of a stage adding noise. A single
+    # chunk does not stand for a 96-entry session; the cross-encoder's value
+    # here is picking the best chunk within a session, which the mode above
+    # already does. See eval/README.md.
+    rerank_session_level: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -263,7 +299,7 @@ class Settings:
             "max_evidence_per_session",
             _env_int("CODEMEM_MAX_EVIDENCE_PER_SESSION", 3),
         )
-        put("evidence_item_tokens", _env_int("CODEMEM_EVIDENCE_ITEM_TOKENS", 380))
+        put("evidence_item_tokens", _env_int("CODEMEM_EVIDENCE_ITEM_TOKENS", 800))
         put("evidence_ptr_tokens", _env_int("CODEMEM_EVIDENCE_PTR_TOKENS", 110))
         put("evidence_budget_tokens", _env_int("CODEMEM_EVIDENCE_BUDGET_TOKENS", 60_000))
         put("min_evidence_score", _env_float("CODEMEM_MIN_EVIDENCE_SCORE", 0.15))
@@ -303,6 +339,15 @@ class Settings:
         )
         put("rerank_device", _env_str("CODEMEM_RERANK_DEVICE", "auto"))
         put("rerank_top_n", _env_int("CODEMEM_RERANK_TOP_N", 120))
+        put(
+            "candidate_per_session",
+            _env_int("CODEMEM_CANDIDATE_PER_SESSION", 0),
+        )
+        put("recall_channel_depth", _env_int("CODEMEM_RECALL_CHANNEL_DEPTH", 0))
+        put(
+            "rerank_session_level",
+            _env_bool("CODEMEM_RERANK_SESSION_LEVEL", False),
+        )
         put("rerank_weight", _env_float("CODEMEM_RERANK_WEIGHT", 0.65))
         put("rerank_temperature", _env_float("CODEMEM_RERANK_TEMPERATURE", 2.0))
         return cls(**kwargs)

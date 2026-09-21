@@ -76,6 +76,10 @@ class Retriever:
     def recall(self, user_id: str, plan: QueryPlan) -> list[Candidate]:
         t0 = time.monotonic()
         per_channel = self.settings.recall_per_channel
+        # Session-major mode pulls a deeper slice per channel, so the
+        # per-session cap below has more than a session or two to choose from.
+        # The shallow slice is the legacy entry-major behaviour.
+        depth = self.settings.recall_channel_depth or per_channel
         k = self.settings.rrf_k
         candidates: dict[int, Candidate] = {}
 
@@ -95,20 +99,20 @@ class Retriever:
         # Channel 1: lexical BM25. Query each probe and fuse by best rank.
         lexical: dict[int, float] = {}
         for probe in plan.probes:
-            for memory_id, score in self.store.bm25_search(user_id, probe, per_channel):
+            for memory_id, score in self.store.bm25_search(user_id, probe, depth):
                 if score > lexical.get(memory_id, float("-inf")):
                     lexical[memory_id] = score
-        merge("lexical", sorted(lexical.items(), key=lambda kv: -kv[1])[:per_channel])
+        merge("lexical", sorted(lexical.items(), key=lambda kv: -kv[1])[:depth])
 
         # Channel 2: exact identifier match.
-        entity_ranked = self.store.entity_search(user_id, plan.entities, per_channel)
+        entity_ranked = self.store.entity_search(user_id, plan.entities, depth)
         merge("entity", entity_ranked)
 
         # Channel 3: dense similarity. Catches paraphrase that shares no
         # literal identifier with the question. The query is embedded here, but
         # memory vectors were embedded during Add, so nothing is generated at
         # search time.
-        dense_ranked = self._dense_recall(user_id, plan, per_channel)
+        dense_ranked = self._dense_recall(user_id, plan, depth)
         if dense_ranked:
             merge("dense", dense_ranked)
 
@@ -116,12 +120,15 @@ class Retriever:
         # we actually have timestamps to compare.
         newest = self.store.max_ts(user_id)
         if newest > 0:
-            recency = self._recency_ranking(user_id, newest, per_channel)
+            recency = self._recency_ranking(user_id, newest, depth)
             merge("recency", recency)
 
-        ordered = sorted(
-            candidates.values(), key=lambda c: (-c.rrf, c.memory_id)
-        )[: self.settings.candidate_pool]
+        ordered = sorted(candidates.values(), key=lambda c: (-c.rrf, c.memory_id))
+        per_session = self.settings.candidate_per_session
+        pool_sessions: int | None = None
+        if per_session > 0:
+            ordered, pool_sessions = self._cap_per_session(user_id, ordered, per_session)
+        ordered = ordered[: self.settings.candidate_pool]
 
         log.info(
             "recall",
@@ -132,6 +139,7 @@ class Retriever:
                     "probes": len(plan.probes),
                     "entities": sum(len(v) for v in plan.entities.values()),
                     "candidates": len(ordered),
+                    "pool_sessions": pool_sessions,
                     "channels": {
                         name: sum(1 for c in candidates.values() if name in c.channels)
                         for name in CHANNEL_WEIGHTS
@@ -141,6 +149,32 @@ class Retriever:
             },
         )
         return ordered
+
+    def _cap_per_session(
+        self, user_id: str, ordered: list[Candidate], per_session: int
+    ) -> tuple[list[Candidate], int]:
+        """Keep at most ``per_session`` entries per session, order preserved.
+
+        A session holds ~96 entries on the proxy corpus, so an entry-counted
+        pool is dominated by whichever few sessions matched first: pool 300
+        spanned ~3 sessions and rerank_top_n 120 barely 1.3. Capping per session
+        spreads the same quota over far more sessions, which is what the
+        session-level ranking downstream needs to have anything to order.
+        """
+        sessions = self.store.session_map(user_id, [c.memory_id for c in ordered])
+        kept: list[Candidate] = []
+        counts: dict[str, int] = {}
+        for cand in ordered:
+            session = sessions.get(cand.memory_id)
+            if session is None:  # unknown session: never drop evidence for it
+                kept.append(cand)
+                continue
+            seen = counts.get(session, 0)
+            if seen >= per_session:
+                continue
+            counts[session] = seen + 1
+            kept.append(cand)
+        return kept, len(counts)
 
     def _dense_recall(
         self, user_id: str, plan: QueryPlan, limit: int

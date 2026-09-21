@@ -118,7 +118,11 @@ class SearchPipeline:
         Returns ``scored`` unchanged when reranking is disabled or unavailable,
         so the pipeline degrades to the recall ordering.
         """
-        if not self.reranker or not scored:
+        if not scored:
+            return scored
+        if self.settings.rerank_session_level:
+            return self._rerank_sessions(plan, scored, memories)
+        if not self.reranker:
             return scored
         head = scored[: self.settings.rerank_top_n]
         texts: list[str] = []
@@ -152,6 +156,79 @@ class SearchPipeline:
         weight = self.settings.rerank_weight
         for cand, rerank_score in zip(head, normalized):
             cand.final = (1.0 - weight) * cand.final + weight * rerank_score
+
+        ranked = sorted(scored, key=lambda c: (-c.final, c.memory_id))
+        top_final = ranked[0].final if ranked else 0.0
+        if top_final > 0:
+            for cand in ranked:
+                cand.final = cand.final / top_final
+        return ranked
+
+    def _rerank_sessions(
+        self,
+        plan: QueryPlan,
+        scored: list[Candidate],
+        memories: dict[int, MemoryRow],
+    ) -> list[Candidate]:
+        """Score one representative document per session, not per entry.
+
+        The entry-level stage spends its whole budget inside whichever sessions
+        happen to fill the pool — 1.3 of them on the proxy corpus — so it can
+        only re-order chunks within a session. Judging one document per session
+        spends the same number of forward passes on the question the payload
+        actually asks: which session comes first.
+
+        The score is applied to every candidate of that session, so the
+        within-session order that ``assemble`` preserves is left intact and only
+        the session order moves.
+        """
+        if not self.reranker:
+            return scored
+
+        head = scored[: self.settings.rerank_top_n]
+        groups: dict[str, list[Candidate]] = {}
+        order: list[str] = []
+        loose: list[Candidate] = []
+        for cand in head:
+            memory = memories.get(cand.memory_id)
+            session = memory.session_id if memory is not None else None
+            if session is None:
+                loose.append(cand)
+                continue
+            if session not in groups:
+                groups[session] = []
+                order.append(session)
+            groups[session].append(cand)
+
+        def document(cand: Candidate) -> str:
+            memory = memories.get(cand.memory_id)
+            if memory is None:
+                return ""
+            body = memory.text[: self.settings.rerank_max_chars]
+            return f"{memory.structural_kind}: {body}"
+
+        # ``scored`` is sorted, so a session's first entry is its strongest.
+        # That is the representative the cross-encoder reads.
+        targets: list[list[Candidate]] = [[cand] for cand in loose]
+        texts = [document(cand) for cand in loose]
+        for session in order:
+            group = groups[session]
+            texts.append(document(group[0]))
+            targets.append(group)
+
+        scores = self.reranker.score(plan.query, texts)
+        if not scores or len(scores) != len(targets):
+            return scored
+
+        from ..rerank import sigmoid
+
+        temperature = self.settings.rerank_temperature
+        normalized = [sigmoid(s / temperature) for s in scores]
+
+        weight = self.settings.rerank_weight
+        for group, rerank_score in zip(targets, normalized):
+            for cand in group:
+                cand.final = (1.0 - weight) * cand.final + weight * rerank_score
 
         ranked = sorted(scored, key=lambda c: (-c.final, c.memory_id))
         top_final = ranked[0].final if ranked else 0.0

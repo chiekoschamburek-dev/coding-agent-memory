@@ -298,6 +298,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="override how many items use the full evidence form")
     parser.add_argument("--recall-limit", type=int, default=None,
                         help="max items the assembler may return")
+    parser.add_argument("--item-tokens", type=int, default=None,
+                        help="cap for items rendered in full form")
+    parser.add_argument("--cap", type=int, default=None,
+                        help="override max_evidence_per_session (chunks per "
+                             "session); the entry window in session terms is "
+                             "top_k / cap, so this moves recall@k in the entry "
+                             "view without touching retrieval")
+    parser.add_argument("--candidate-per-session", type=int, default=None,
+                        help="keep at most N candidates per session before "
+                             "truncating the pool (0 = entry-major, the "
+                             "default)")
+    parser.add_argument("--recall-channel-depth", type=int, default=None,
+                        help="entries pulled per recall channel when the pool "
+                             "is session-major")
+    parser.add_argument("--rerank-session-level", action="store_true",
+                        help="score one representative document per session "
+                             "instead of one per entry")
+    parser.add_argument("--rerank-weight", type=float, default=None,
+                        help="blend weight of the cross-encoder score")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -315,6 +334,18 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_budget_tokens"] = args.budget_tokens
     if args.full_count is not None:
         overrides["evidence_full_count"] = args.full_count
+    if args.cap is not None:
+        overrides["max_evidence_per_session"] = args.cap
+    if args.item_tokens is not None:
+        overrides["evidence_item_tokens"] = args.item_tokens
+    if args.candidate_per_session is not None:
+        overrides["candidate_per_session"] = args.candidate_per_session
+    if args.recall_channel_depth is not None:
+        overrides["recall_channel_depth"] = args.recall_channel_depth
+    if args.rerank_session_level:
+        overrides["rerank_session_level"] = True
+    if args.rerank_weight is not None:
+        overrides["rerank_weight"] = args.rerank_weight
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

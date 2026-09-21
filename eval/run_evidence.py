@@ -331,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ptr-tokens", type=int, default=None)
     parser.add_argument("--operative-weight", type=float, default=None)
     parser.add_argument("--max-sessions", type=int, default=None)
+    parser.add_argument("--cap", type=int, default=None,
+                        help="override max_evidence_per_session")
     parser.add_argument(
         "--prefix-tokens",
         type=int,
@@ -338,6 +340,8 @@ def main(argv: list[str] | None = None) -> int:
         default=[1000, 2000, 4000, 8000],
         help="token budgets to score at, modelling the platform's counted prefix",
     )
+    parser.add_argument("--rows", type=Path, default=None,
+                        help="dump per-question rows, for paired comparison")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -365,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_operative_weight"] = args.operative_weight
     if args.max_sessions is not None:
         overrides["evidence_max_sessions"] = args.max_sessions
+    if args.cap is not None:
+        overrides["max_evidence_per_session"] = args.cap
 
     result = run(args.qa, args.data, top_k=args.top_k, limit=args.limit,
                  settings_overrides=overrides, quiet=args.quiet,
@@ -378,6 +384,28 @@ def main(argv: list[str] | None = None) -> int:
                 {k: v for k, v in result.items() if k != "rows"}, handle, indent=1
             )
         print(f"\nwrote {args.json}")
+
+    if args.rows:
+        # Per-question outcomes, so two runs can be compared as pairs rather
+        # than as two independent rates: a three-question difference on n=30
+        # is either three questions that moved or noise, and only the paired
+        # view can tell which.
+        args.rows.parent.mkdir(parents=True, exist_ok=True)
+        with args.rows.open("w", encoding="utf-8") as handle:
+            json.dump(
+                [
+                    {
+                        "query_id": r["query_id"],
+                        "decidable": r["decidable"],
+                        "decisive_present": r["decisive_present"],
+                        "ambiguous": r["ambiguous"],
+                    }
+                    for r in result["rows"]
+                ],
+                handle,
+                indent=1,
+            )
+        print(f"wrote {args.rows}")
     return 0
 
 

@@ -69,6 +69,53 @@ that would help for another reason (a shared technique, an architectural
 decision) is not credited. The caveat is stored in the benchmark metadata so
 results are never presented as official.
 
+The two sides of the label come from different evidence, which is worth knowing
+before reading a recall figure:
+
+| side | where "files" comes from | what it means |
+|---|---|---|
+| task | `patch` ∪ `test_patch`, parsed from `+++ b/` and `diff --git` headers | the files the fix actually edits |
+| session | the `"file_path": "..."` field in the transcript's tool calls | the files the agent **looked at** — read or edited alike |
+
+Both sides are normalised to a repository-relative key (`testbed/` and
+`owner__repo/` prefixes stripped), because the transcripts contain three
+spellings of the same path. The asymmetry stands though: a session that only
+*read* a file counts exactly as much as one that rewrote it, so "touched" is a
+weaker signal than "worked on".
+
+**How much of the label is structural.** A session touches a median of 6 files
+(mean 6.6); a task's gold+test patch touches a median of 3 (mean 4.4). With
+pools that size, 4.94 % of all same-repository (task, session) pairs overlap.
+File overlap is a *common* event inside one repository, not a rare signal — which
+is how a django task ends up with 5.86 relevant sessions while only 1.67 of them
+share more than one file. That is the mechanism behind the 70 % single-file
+figure in the decomposition section below.
+
+The label is also **binary and session-level**: no relevance strength, and no
+per-entry judgement, even though the platform scores memory entries.
+
+**We use SWEContextBench's data, not its metric.** Its own evaluation is
+SWE-bench's: you submit `{instance_id}_preds.json` holding a `model_patch`,
+`evaluation.sh` runs `swebench_memory.harness.run_evaluation` in Docker, and an
+instance counts as solved when its `FAIL_TO_PASS` tests pass and its
+`PASS_TO_PASS` tests still pass — i.e. **resolve rate**. That measures whether an
+agent can *repair* the bug using past experience. It says nothing about
+retrieval, and no number in this file is comparable to it.
+
+So the relationship is three layers deep, and each step is an approximation:
+
+| layer | question | metric | defined by |
+|---|---|---|---|
+| SWEContextBench official | can the agent fix the bug using past experience | resolve rate (FAIL_TO_PASS / PASS_TO_PASS) | upstream, SWE-bench harness |
+| our proxy | did retrieval surface the right sessions | MRR / recall@k / nDCG | us, file-overlap gold |
+| CAMBench Coding | does the answer model answer correctly | not public; our proxy for it is accuracy | the platform |
+
+Our relevance definition is a proxy for the upstream notion of "related", which
+the paper derives from dependency and reference relationships between GitHub
+issues and PRs — a signal the dataset does not expose as a per-pair mapping.
+File overlap is our substitute for it, and the 70 % single-hot-file result in
+the decomposition section below is how loose that substitute is.
+
 ### Running it
 
 ```bash
@@ -89,7 +136,10 @@ through the store, which is how the file-overlap ground truth is compared.
 300 sessions added, 89 scored queries. `P1` is the deterministic baseline;
 later stages are additive over it.
 
-Measured on the development GPU (RTX 5060 Laptop, 8 GB) with `device=auto`:
+Measured on the development GPU (RTX 5060 Laptop, 8 GB) with `device=auto`.
+**These are session-unit numbers** (the ablation was run before the entry view
+existed, and they were never re-derived in it); the entry-unit figures for P1 and
+P2c are further down, and the gap is ~15 points at k=10:
 
 | configuration | MRR | nDCG@10 | nDCG@100 | recall@10 | precision@10 | Add | Search |
 |---|---|---|---|---|---|---|---|
@@ -100,8 +150,316 @@ Measured on the development GPU (RTX 5060 Laptop, 8 GB) with `device=auto`:
 | **P2c + dense + rerank** (default) | **0.7718** | **0.6586** | **0.7306** | **0.7133** | **0.2242** | 155 s | 674 ms |
 
 MRR 0.77 against 0.23 for random, nDCG@10 0.66 against 0.19. Since the platform
-consumes a token-counted *prefix* of our ranking, the `@10` figures are closer to
-what reaches the answer model than `@100` is.
+consumes a token-counted *prefix* of our ranking, the `@10` window is the relevant
+one — but read it as **10 sessions ≈ 21 memory entries**, not 10 entries. The
+entry-unit reading of the same ranking is what the graded payload delivers, and it
+is reported alongside from here on; see the section on the two accounting units.
+
+### What recall@10 = 0.67 is actually made of
+
+`recall@10` is the weakest-looking number in the table, so it is worth
+decomposing before anyone tries to optimise it. `--dump-per-query` now exports
+both the ranked session list and, for each relevant pair, *how many* files the
+query's patch shares with that session. That splits the metric by label
+strength (measured on the P1 run, `eval/results/current.json`; the label
+structure is fixed, so the decomposition carries to other configurations):
+
+| relevance | pairs | recall@10 | recall@100 |
+|---|---|---|---|
+| all (≥1 shared file) | 333 | 0.6655 | 0.9152 |
+| **strong** (≥2 shared files) | 101 | **0.7750** | 0.9804 |
+| ≥3 shared files | 10 | 0.9000 | 1.0000 |
+
+The gradient is monotone and steep: the better the label, the better we rank it.
+So the headline is not a ranking failure, it is mostly a **labelling** one:
+
+- **70 % of "relevant" pairs share exactly one file** (232 of 333; mean overlap
+  1.34, max 4). Relevance here is "touched at least one file the patch touched",
+  which credits a session whose entire connection to the task is one file.
+- **That one file is usually a repository hotspot**, not a coincidence of
+  tests. The most-shared single files are `django/db/models/sql/query.py` (23
+  pairs), `django/db/models/query_utils.py` (19), `sql/compiler.py` (13). Only
+  15 % of weak pairs share a test file. So the definition inflates the relevant
+  set wherever a repo has a file everybody touches: django averages **5.86**
+  relevant sessions per query but only **1.67** strong ones.
+- **43 of 99 queries have no strong-relevant session at all.**
+
+It is also *not* a capacity or truncation artefact. The ceiling under perfect
+ranking is 0.9814 (only 4 queries have more than 10 relevant sessions, 890
+slots for 333 relevant pairs), and `candidate_pool` is 300 — the whole corpus —
+so nothing is being cut before ranking.
+
+What is left is the real target: of the 96 strong-relevant sessions, **33 % land
+outside the top 10** (21.9 % at rank 11–20, 11.5 % beyond 20). That third is the
+part worth attacking; the rest of the gap is measurement definition.
+
+Practical consequence: treat `recall@10` on all pairs as a regression tripwire,
+not a target, and read the strong-only figure alongside it. Optimising the
+all-pairs number would mean learning to rank sessions whose only tie to the
+query is a hot file — which is exactly the behaviour IDF exists to suppress.
+
+**The strong-relevant gap is largely already closed by P2c.** The 33 % figure
+above is measured on the P1 run. On the full default configuration (dense +
+rerank, `eval/results/p2c_base.json`, GPU):
+
+| configuration | strong recall@10 | strong outside top-10 | all recall@10 | MRR |
+|---|---|---|---|---|
+| P1 lexical + entity | 0.7750 | 33.3 % | 0.6655 | 0.7248 |
+| **P2c + dense + rerank** | **0.8601** | **17.0 %** | 0.7115 | 0.7778 |
+
+So the semantic channels already recover about half of what the lexical stack
+misses. Of the 23 strong sessions still outside the top 10 under P2c, 7 are
+never returned at all — those, not the 11–20 band, are what is left to attack.
+
+**One attempt to close it from the lexical side: measured, failed, reverted.**
+Session-pooled identifier evidence (`entity_session_share`): a chunk covers one
+span of one file, so a session whose evidence spans two files arrives as two
+middling chunks, and per-chunk scoring cannot tell it from a session that
+matched once on a hot file. Pooling a session's identifier scores and crediting
+each chunk `own + share × (session − own)` should restore that distinction.
+
+It did not. On P1: MRR 0.7248 → 0.7340, strong recall@10 **0.7750 → 0.7750**,
+strong-outside-top-10 33.3 % → 33.3 %. Paired bootstrap over 89 queries gives
+**p ≈ 0.38** (14 queries moved, 9 up / 5 down) — indistinguishable from noise.
+Reverted rather than shipped.
+
+The reason is diagnostic, and it generalises. For the dropped strong sessions:
+
+- **46 % contain none of the query's extracted identifiers at all** (17 of 37),
+  so no amount of identifier weighting can reach them — only semantics can;
+- of the 20 that *do* contain query identifiers, comparing their IDF-weighted
+  identifier score against the highest-ranked irrelevant session in the same
+  top-10 gives **5 wins, 5 losses, 10 exact ties**. Half the time the identifier
+  evidence is literally identical, because every django session discusses the
+  same ORM files.
+
+That is the ceiling of the lexical/entity feature space on this corpus: the
+label distinction ("shared two files" vs "shared one") is not a distinction the
+text carries. It is also a caution for future work — the all-pairs `recall@10`
+moved (+0.005) while the thing we set out to fix did not move at all, so any
+change here has to be read on the strong-only split.
+
+### Every quota in the config is counted in memory entries, not sessions
+
+Adding the 300 benchmark sessions produces **28 675 memories** — a mean of
+**95.6 entries per session** (median 89, max 261). That single number reframes
+every retrieval quota, because all of them count entries:
+
+| setting | value | in sessions |
+|---|---|---|
+| `recall_per_channel` | 120 | ~1.3 |
+| `candidate_pool` | 300 | ~3.1 |
+| `rerank_top_n` | 120 | ~1.3 |
+| `listwise_max_candidates` | 40 | ~0.4 |
+
+They were tuned while memories and sessions were roughly one-to-one, and they
+were never re-derived after chunking. A single average session now holds enough
+entries to fill a whole recall channel by itself.
+
+**The entries are messages, not sub-message chunks.** Add chunks each message
+independently (`target_chunk_tokens=320`, `hard_chunk_chars=24 000`), and on this
+corpus that almost never splits anything: a message is a median of **151**
+characters (mean 756), and **96.3 % of messages yield exactly one chunk**, only
+3.7 % more than one. The count comes out *below* one entry per message (0.84)
+because roughly a fifth of the messages flatten to empty text — `build_benchmark`
+drops `thinking` blocks — and are skipped. So "one session ≈ 114 turns ≈ 95.6
+memory entries" and "one turn ≈ one entry" are both true here, and the chunker is
+effectively a pass-through. That would not hold for a corpus of large tool
+outputs or file dumps, which is the case the chunker exists for.
+
+**The 7 strong sessions never returned under P2c** split cleanly. Replaying the
+search internals per pair: **5 of the 7 contribute zero entries to the candidate
+pool** — they are lost at recall, not at the gate. The other 2 do reach scoring
+and clear `min_evidence_score` comfortably (final 0.44 and 0.97), so they are
+lost later, in P2c's cross-encoder stage, not to the noise gate.
+
+**Widening the quotas does not fix it — measured.** `recall_per_channel=400`,
+`candidate_pool=800` (≈8 sessions' worth of pool instead of ≈3):
+
+| | pool 300 | pool 800 | delta |
+|---|---|---|---|
+| MRR | 0.7248 | 0.7186 | −0.0062 |
+| recall@10 | 0.6655 | 0.6634 | −0.0021 |
+| recall@100 | 0.9152 | 0.9143 | −0.0009 |
+
+`recall@100` does not move, which is the tell: the missing sessions are not
+sitting just outside the pool, they score too low to reach rank 100 even when
+admitted. More candidates means more low-scoring entries competing in the same
+normalisation, which is why the numbers drift slightly down rather than up. So
+the cause is weak textual evidence, not truncation — consistent with the 46 %
+of dropped strong sessions that contain none of the query's identifiers at all.
+
+This does not mean the quotas are right; it means widening them is not the fix.
+A quota expressed in *distinct sessions* (cap chunks per session before
+truncating the pool) is the untested variant, and the pool figure above is the
+measurement that would show whether it matters.
+
+### The platform counts memory entries, not sessions
+
+`api_guide.md` is explicit: `top_k` is "允许返回的最大记忆条数", fixed at 100 for
+the scored run, and `data[]` entries are what "按返回顺序进入 Answer". The
+platform has no concept of a session at the interface — it sees 100 text spans.
+
+Neither do we, on the way out. `EvidenceItem` carries `memory_id`, `content`,
+`score`, `created_at` — no session field — and `content` is a verbatim span with
+no header or label. So the session never reaches the answer model: it only
+decides **which** entries occupy the 100 slots and **in what order**. That is its
+one real effect, and it is a packing policy, not information the answer model
+reads.
+
+Sessions are *our* unit, and the exchange rate is ours to set: Add turns one
+session into ~95.6 memory entries, and `assemble` then caps a session at 3 of
+them, so the observed packing is **2.06 memory entries per session**. That means
+`top_k=100` buys roughly **48 sessions, not 100** — and with no per-session cap
+it would buy one or two, since a single session alone holds enough entries to
+fill the whole payload.
+
+The two units do not score the same, and `run_benchmark` now reports both from a
+single run — the unprefixed rows collapse `data[]` onto sessions, the `item_`
+rows score the entry list itself. Default configuration (dense + rerank, GPU,
+n=89):
+
+| metric | session units | **memory-entry units** |
+|---|---|---|
+| recall@10 | 0.7344 | **0.5823** |
+| nDCG@10 | 0.6787 | 0.5479 |
+| precision@10 | 0.2334 | **0.4184** |
+| MRR | 0.7922 | 0.7424 |
+| recall@100 | 0.9118 | 0.9118 |
+| items per session | — | 2.07 |
+
+**The `item_` rows are the ones that track the platform.** The k=10 gap is not
+cosmetic: 0.7344 versus 0.5823 means the session figure credits evidence sitting
+in slots 11–25 that the graded payload does not deliver at a ten-slot budget.
+
+Two rows read oddly and both are correct. **Entry precision is higher than
+session precision** (0.4184 vs 0.2334) — a session holding three of the top ten
+slots counts once in a session denominator and three times here, and that is the
+metric doing its job: 41.8 % of the graded budget is spent on evidence from a
+relevant session. And **the units agree exactly at k=100**, because that is the
+whole payload: no truncation, no gap.
+
+**Every number in this README above is in session units, which is the optimistic
+of the two** — by ~15 points at top-10 on the default configuration. The session
+figure asks "did any chunk of the right session make the window"; the entry
+figure asks "how much of the right session's evidence is in the window", and that
+is closer to what the answer model can actually read. They converge only at
+k=100, where the whole payload is in view.
+
+**But the gap is the window, not the signal.** Compare the two units at matched
+payload size — session `recall@k` against entry `recall@k` where `k` is however
+many entries those first `k` sessions actually consume:
+
+| session k | entries those sessions read | session recall | entry recall, same entries |
+|---|---|---|---|
+| 5 | 14 | 0.5698 | 0.5730 |
+| 10 | 25 | 0.6634 | 0.6794 |
+| 20 | 42 | 0.7968 | 0.7621 |
+
+Aligned, they agree to within ~4 points. So session `recall@10` is not measuring
+something different from entry `recall@10`; it is entry `recall@25`. Both are
+honest readings of the same ranking — at different budgets.
+
+That is exactly why the unit has to be fixed, and why the session unit is the
+wrong one for a headline number: **the size of a session-`k` window depends on
+`max_evidence_per_session`.** At cap 1 those first ten sessions are ten entries;
+at cap 3 they are twenty-five. So `recall@10` in a cap-1 run and `recall@10` in a
+cap-3 run are not comparable quantities, which is the whole of the "cap 1 scores
+marginally better" finding (0.9231 vs 0.9193) — a bigger window, not a better
+ranking. An entry-`k` window is a fixed number of slots regardless of packaging,
+so it survives a change of assembly policy and can be mapped onto the platform's
+token prefix directly.
+
+**What the metrics count, and what they deliberately do not.**
+
+- `recall@k` takes a **set intersection** and `nDCG@k` credits a document only on
+  **first appearance**, so padding the entry list with repeats of one session
+  cannot inflate either. On the collapsed list this changes nothing, which is why
+  the session numbers here are unchanged from before.
+- `precision@k` deliberately does **not** deduplicate: it counts slots, because a
+  repeated session consuming three of them is a real cost to the answer model's
+  budget. Set-deduplicating it would silently redefine it as "density of distinct
+  relevant sessions" and report a payload wasting two thirds of its budget on
+  repeats as though the slots were free — measured, that is 0.4184 versus 0.1511
+  on the default configuration.
+- All of them are still **binary**: relevance is `1.0 if doc_id in relevant else
+  0.0`. The `score` field we return is never read, and there is no graded
+  relevance, so nothing is scored for *quality* of the returned text — one
+  perfect span and three identical spans score the same.
+
+One consequence worth spelling out even now that both units are reported: **the
+size of a session-`k` window still depends on `max_evidence_per_session`.** At
+cap 1 those first ten sessions are ten entries; at cap 3 they are twenty-odd. So
+session `recall@10` in a cap-1 run and in a cap-3 run are not comparable
+quantities — which is the whole of the "cap 1 scores marginally better" line in
+the tuning table (0.9231 vs 0.9193): a bigger window, not a better ranking. An
+entry-`k` window is a fixed number of slots regardless of packaging, so it is the
+one to put in a headline.
+
+This is also the same gap the evidence metric found from the other direction: the
+answer session is present in the payload 100 % of the time, but `decidable` is
+0.233. Session-level presence is not entry-level usefulness.
+
+### Where the entry-level loss comes from
+
+`scripts/diagnose_entry_recall.py` splits the relevant sessions of every query
+into the window, the payload below it, or nowhere — under the real slot
+constraint, since a session spends up to `cap` of the k slots and the window
+therefore cannot hold `min(avail, k)` distinct sessions. On the default
+configuration, with entry `recall@10 = 0.5823` (n=89, 333 relevant sessions):
+
+| bucket | macro | micro |
+|---|---|---|
+| in window (achieved) | 58.2 % | 39.6 % |
+| in payload, recoverable by reordering | 24.8 % | 25.5 % |
+| in payload, no slot left at cap 3 | 8.2 % | 18.3 % |
+| never entered the payload | 8.8 % | 16.5 % |
+| ceiling (perfect reorder, same payload) | 83.0 % | 65.2 % |
+
+Of the 42-point shortfall, **reordering owns 59 %, retrieval 21 %, and the
+per-session cap 20 %** — in the macro view, which is the one that matches how the
+platform scores, since each query is one answer. Weighted by relevant sessions
+instead the three are near even (25.5 / 18.3 / 16.5), and that is django/django,
+which carries 211 of the 333 relevant sessions. The micro column is not a
+statement that those queries matter more.
+
+Two facts fix the shape of this. **Candidate generation is not the bottleneck**:
+90.7 % of relevant sessions are already in the payload. And **the payload is
+thinner than `top_k` suggests** — 59.2 entries over 28.6 sessions, because the
+0.15 noise gate ends assembly long before the 100-item budget is reached
+(`evidence.py` breaks on `group[0].final < min_evidence_score`, not on
+`len(items) >= top_k`).
+
+**The cap is a mechanical lever, not a ranking effect.** The session set is
+gate-decided, so lowering `max_evidence_per_session` costs no retrieval — it only
+changes how many sessions the first k slots can span:
+
+| cap | item recall@10 | sessions spanned by 10 slots | equals |
+|---|---|---|---|
+| 3 (default) | 0.5823 | 4.00 | session recall@4 = 0.5818 |
+| 2 | 0.6321 | 5.19 | session recall@5 = 0.6313 |
+| 1 | 0.7344 | 9.42 | session recall@9 = 0.7253 |
+
+The cap-3 row reads the dump verbatim; the other rows are replayed by rebuilding
+the entry sequence from `ranked`, which `--dump-per-query` retains for exactly
+this purpose, and the replay reproduces the measured 0.5823 to the digit. This is
+the whole of the 15-point gap between the two units: entry `recall@10` is not a
+stricter reading of the same ranking, it is session `recall@4`.
+
+`--cap N` was added to `run_benchmark.py` so that this is a flag rather than an
+edit. Note that the harness constructs `Settings` from dataclass defaults plus its
+own overrides and never calls `from_env`, so **editing `.env` has no effect on
+`run_benchmark.py`** — the flag is the way in. Before moving the default, check
+the end-to-end answer score: the session view barely moves across caps, and cap 1
+hands the answer model a single span per session, which no entry-view metric can
+price.
+
+**"Too much noise" is largely a misreading.** 58.2 % of the window is irrelevant,
+but only part of that is crowding. Reordering the same payload lifts the share of
+slots holding a relevant entry from 41.8 % to 63.3 %; the remaining 36.7 % is not
+displaced evidence but absent evidence — the mean query has 3.74 relevant sessions
+and 8.06 relevant chunks in the payload against 10 slots. The window is larger
+than the answer.
 
 **The value of dense retrieval depends on the device, and this flipped the
 decision.** On CPU it added no metric gain over rerank-only while costing ~5× the
@@ -136,6 +494,91 @@ Re-measured afterwards, the ranking is unchanged — P1 MRR 0.7248 and recall@10
 0.6655, P2c MRR 0.7718 and recall@10 0.7133, matching the pre-change figures. The
 reason is that a real session trajectory is already close to maximally compact,
 so the header was costing answer-model budget without buying ranking quality.
+
+### Session-major pool and session-level reranking: measured, not shipped
+
+The two variants above were built on one observation: every quota counts
+entries, and a session is ~95.6 entries, so `candidate_pool` 300 spans ~3
+sessions and `rerank_top_n` 120 barely 1.3. The cross-encoder was therefore
+spending its whole budget re-ordering chunks *inside* one or two sessions.
+
+Two switches were added, both off by default:
+
+* `candidate_per_session` + `recall_channel_depth` — pull a deeper slice per
+  channel, then keep at most N entries per session before truncating the pool
+  (`Retriever._cap_per_session`);
+* `rerank_session_level` — score one representative document per session and
+  apply that score to every candidate of the session, so only the session order
+  moves (`SearchPipeline._rerank_sessions`).
+
+All rows are the same machine, same corpus, n=89, dense + rerank on GPU:
+
+| configuration | MRR | nDCG@10 | recall@10 | recall@100 | item MRR | item nDCG@10 | item recall@10 | items/session |
+|---|---|---|---|---|---|---|---|---|
+| default (cap 3) | 0.7922 | 0.6787 | 0.7344 | 0.9118 | 0.7424 | 0.5479 | 0.5823 | 2.07 |
+| A: session-major pool | 0.8109 | 0.6827 | 0.7319 | 0.8907 | 0.7682 | 0.5520 | 0.5628 | 2.48 |
+| A+B: + session rerank | 0.7334 | 0.6189 | 0.6816 | 0.8724 | 0.6778 | 0.4939 | 0.5368 | 2.46 |
+| A+B, rerank weight 0.30 | 0.7509 | 0.6422 | 0.7006 | 0.9160 | 0.6915 | 0.5214 | 0.5731 | 2.53 |
+| cap 2 (default pool) | 0.7922 | 0.6787 | 0.7344 | 0.9142 | 0.7579 | 0.5869 | **0.6321** | 1.62 |
+| A + cap 2 | 0.8111 | 0.6827 | 0.7319 | 0.9381 | 0.7817 | 0.5882 | 0.6122 | 1.83 |
+
+Paired bootstrap over 89 queries (search latency is not compared: it ranged
+1.06–1.49 s across runs on this host, so the differences are host noise):
+
+| comparison | MRR delta | item recall@10 delta |
+|---|---|---|
+| A − default | +0.0187, p=0.24 | −0.0194, p=0.25 |
+| A+B − default | **−0.0588, p=0.006** | **−0.0454, p=0.015** |
+| A+cap2 − cap2 | +0.0190, p=0.25 | −0.0199, p=0.30 |
+| cap 2 − cap 3 | +0.0000 (0 queries moved) | **+0.0498, CI [+0.024, +0.083], p<0.001** |
+
+**B is a measured loss, and it fails the attenuation test.** Dropping the
+blend weight from 0.65 to 0.30 walks every metric monotonically back toward the
+baseline (MRR 0.7334 → 0.7509, item recall@10 0.5368 → 0.5731) — the same
+signature listwise showed, and the same reading: a stage contributing noise
+rather than signal. The likely mechanism is the representative document: one
+chunk does not stand for a 96-entry session, and the listwise experiment above
+already showed that a judge needs more excerpt, not less, to decide relevance.
+So the cross-encoder's value here is picking the best chunk *within* a session,
+not ordering sessions against each other.
+
+**A is not provably a gain.** MRR moves +0.019 with p=0.25 while item
+recall@10 moves −0.019 with p=0.25 — the same size in both directions, which is
+noise. It does widen the payload (recall@100 0.9118 → 0.9381 under cap 2), but
+that is the one thing the earlier pool-300→800 experiment already showed is not
+the binding constraint, and it costs entry-window coverage because a session
+that now has three candidates in the pool fills more of the ten slots
+(items/session 1.62 → 1.83). Candidate generation is not the bottleneck, again.
+
+**The one significant result in this block is the cap, and it is mechanical.**
+`max_evidence_per_session` 3 → 2 lifts item recall@10 by +0.0498 (p<0.001) with
+zero queries changing their session-level MRR — it cannot be a ranking effect,
+it only changes how many sessions the first ten slots span.
+
+Whether that is worth having is a different question, so it was priced with
+`run_evidence.py` (n=30, same machine, `decidable` = the decisive line is in
+what the answer model can read and no distractor contradicts it):
+
+| cap | items | tokens | decidable @1000 | @2000 | @4000 | @8000 | all | decisive (all) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 34.0 | 3981 | 0.400 | 0.400 | 0.367 | 0.333 | 0.333 | 0.500 |
+| 2 | 54.1 | 5557 | 0.433 | 0.433 | 0.400 | 0.300 | 0.300 | 0.633 |
+| **3 (default)** | 67.2 | 6548 | 0.433 | 0.433 | **0.433** | **0.367** | **0.333** | **0.700** |
+| 4 | 75.1 | 6996 | 0.433 | 0.400 | 0.400 | 0.367 | 0.400 | 0.733 |
+
+cap 1 is a clear loss — one span per session drops decisive evidence from 0.700
+to 0.500, which is the failure README already suspected. Between 2, 3 and 4 the
+differences are one or two questions out of thirty, i.e. inside the noise, but
+every prefix row of cap 3 is ≥ cap 2, and `decisive` falls monotonically as the
+cap tightens (0.733 → 0.700 → 0.633 → 0.500).
+
+So cap 2 buys +0.0498 on a *proxy of window coverage* and pays for it on the
+proxy of *usefulness*, and the payment is on the axis the platform actually
+scores. It is not adopted; the default stays at 3.
+
+(Compare within this table only: the `decidable` 0.233 baseline quoted further
+up was measured on an earlier revision, and the same command now returns 0.333
+at cap 3. The four rows here are one machine, one revision, one command.)
 
 ### Listwise reranking (LLM): measured, not shipped
 
@@ -302,6 +745,40 @@ An earlier version of this diagnostic searched for the file name as a substring 
 reported 45%, which was a false positive rate: an Edit payload's `old_string` can
 name other files. Parsing the `file_path` field and counting the three evidence
 forms is what made the number trustworthy.
+
+**The item token budget was the knob, and 380 was the bottleneck.** Same
+harness, same 30 questions, sweeping `evidence_item_tokens` (the cap on an item
+rendered in full form):
+
+| item tokens | payload tokens | decidable @1000 | @2000 | @4000 | @8000 | all | decisive (all) | ambiguous (all) |
+|---|---|---|---|---|---|---|---|---|
+| 380 (old default) | 6548 | 0.433 | 0.433 | 0.433 | 0.367 | 0.333 | 0.700 | 0.433 |
+| 600 | 6942 | 0.533 | 0.467 | 0.500 | 0.433 | 0.367 | 0.800 | 0.467 |
+| **800 (new default)** | 7190 | **0.600** | **0.567** | **0.567** | **0.467** | **0.400** | 0.800 | 0.433 |
+| 1200 | 7530 | 0.500 | 0.533 | 0.567 | 0.433 | 0.367 | 0.800 | 0.467 |
+
+Paired over the same questions, 800 versus 380: **+3 decisive / −0** (exact
+p=0.25), **+2 decidable / −0** (p=0.50), and zero questions moved on
+`ambiguous`. It is a one-directional change — nothing gets worse, three
+questions get better — and it costs +9.8 % payload tokens (6548 → 7190, still
+an eighth of `evidence_budget_tokens`). 1200 buys nothing over 800 and starts
+pulling distractor modifications into the window.
+
+Two neighbouring knobs were swept and do **not** earn a change:
+
+* `evidence_full_count` 8 → 40 (more items in full form): tokens 6548 → 10376
+  for `decidable` 0.433 → 0.400 at @4000 and 0.400 at the whole payload. Wide
+  but shallow loses to narrow but deep.
+* `evidence_operative_weight` 1.0 → 3.0: `decisive` falls 0.700 → 0.667 while
+  `ambiguous` rises 0.433 → 0.533 — weighting operative lines harder pulls in
+  *other* sessions' modifications too, which is exactly the ambiguity the
+  metric exists to catch.
+
+**The ranking is untouched by any of this**, which is what makes it a clean
+content-selection win: re-running the proxy benchmark at 800 reproduces every
+number to the digit (MRR 0.7922, recall@10 0.7344, item recall@10 0.5823,
+items/session 2.07, 59.2 items returned). Only the text each item carries
+changes.
 
 ### Evidence sufficiency: the deterministic metric to tune against
 
@@ -565,6 +1042,9 @@ tried for ranking.
 | Reject the optimum at cap=1 | cap=1 measured marginally better recall (0.9231 vs 0.9193) but the proxy scores *whether a session was found*, not *whether its content is enough to answer*. Optimizing a measurable proxy at the cost of an unmeasurable quality is how benchmarks get gamed; cap=3 keeps session context for a 0.4 % metric difference. |
 | Rerank weight 0.65, temperature 2.0 | Both swept. Weight: 0.65 peaks (MRR 0.7716); 0.85 and 0.95 degrade (0.7311, 0.7347) even though precision@10 rises — precision@10 is not what the answer model needs. |
 | End-to-end result reported as null, not as a win | 0.689 vs 0.689 with 4 gained / 4 lost and p=0.72 is indistinguishable from chance. Reporting the aggregate as anything other than "no detectable effect" would be reading noise, and the paired no-memory condition exists precisely to make that visible. |
+| Session-major candidate pool off by default | Measured on the same machine: MRR +0.019 (p=0.25) against item recall@10 −0.019 (p=0.25) — noise in both directions, and the one thing it clearly does (widen the payload) is the thing the earlier pool 300→800 experiment showed is not the binding constraint. |
+| Session-level reranking off | Every metric sits below the entry-level stage (MRR −0.059, p=0.006) and lowering the blend weight drifts monotonically back toward the baseline — the attenuation signature of noise, not signal. A single chunk does not stand for a 96-entry session. |
+| `max_evidence_per_session` left at 3 | cap 2 measures item recall@10 +0.0498 (p<0.001), but with zero queries changing session MRR it is a window effect, not a ranking gain. Priced against `run_evidence.py`, every prefix row of cap 3 is ≥ cap 2 and `decisive` falls monotonically as the cap tightens (0.733 → 0.700 → 0.633 → 0.500 at cap 1). The gain is on a proxy of window coverage, the loss on a proxy of usefulness — so the default stays. |
 | Listwise reranking off by default | Every setting scored below the no-listwise configuration and cost ~5x search latency. See the table above; the attenuation signature shows it adds noise here, but the proxy measures file overlap rather than usefulness, so this is unresolved rather than settled. |
 | Dense enabled by default, device `auto` | The dense cost/benefit flips with hardware (see the table above). `auto` resolves to CUDA when present and CPU otherwise, so one image is fast on a GPU host and still contract-compliant on a CPU one, rather than being tuned for whichever machine happened to measure first. |
 | Rerank pool 120 | MRR 0.684 / 0.746 / 0.772 at top_n 30 / 60 / 120: larger is better, and on GPU the 120-pool costs 0.5 s per search, so there is no reason to shrink it. |

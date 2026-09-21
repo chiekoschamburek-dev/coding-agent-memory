@@ -123,6 +123,53 @@ A second request carrying identical text under a different `request_id` maps to
 the same memory via `UNIQUE (user_id, sha)`, so re-sends cannot duplicate the
 pool.
 
+**One session per request, but a session may span several requests.** The
+contract's `session_id` is a single value, and which of the platform's messages
+arrive together is its choice: the example `request_id`
+(`eval:<run_id>:locomo_refined:conv-0:chunk-0`) carries a segment suffix, and the
+`messages[].timestamp` note says "分段不改变其值和消息顺序" — segmentation is
+expected. We support it (the `chunk` uniqueness key includes `request_id`, so
+segments never overwrite each other), but two fields restart per request:
+`msg_index` and `ord` both begin at 0 again, so segment 2's message 0 is
+indistinguishable from segment 1's. Nothing in Search reads either field, so
+retrieval is unaffected; provenance is.
+
+**The dedup key has no `session_id` in it, and that is not free.** Measured on
+the proxy corpus: 34 186 messages chunk into 37 115 chunks, of which 28 675 become
+memories. Splitting the loss by cause:
+
+| | chunks | share | is it a loss? |
+|---|---|---|---|
+| same session repeated itself | 3 235 | 8.7 % | no — the dedup is doing its job |
+| **another session already had the text** | **5 205** | **14.0 %** | **yes — provenance is lost** |
+
+`UNIQUE (user_id, sha)` cannot tell "the same session re-sent the same text" from
+"two different sessions both said this", and the second case is 14 % of the
+corpus. Identical text lands under whichever session wrote first.
+
+**How much this actually costs.** Less than the 14 % suggests, for two reasons.
+First, what gets dropped is repetition — stock assistant openings, identical tool
+errors — not a session's substance: measured per session, the keep rate is 65 %
+to 100 % (mean 76.3 %), and **not one of the 300 sessions loses more than a third
+of its memories**, none is emptied. Second, because the drop condition is *exact
+text equality*, the receiving session already contained that text, so dedup never
+moves foreign content into another session's assembly group — it cannot corrupt a
+group's context, only shorten a session's own list.
+
+So for the returned payload the effect is small, and it is not a reason to make
+the key three columns. It does make `memory.session_id` an unreliable record of
+authorship, which is worth knowing before using it to reason about attribution —
+see `eval/README.md` on why the session is a packing unit and a proxy label, not
+a contract unit.
+
+Whether that matters depends on the reader. For answer quality it is close to
+harmless — the text is still in the pool and still retrievable. For **provenance
+and for any session-level measurement** it is not: the memory a session
+contributed can be attributed elsewhere, which is one of the reasons
+`eval/run_benchmark.py` sees fewer retrievable entries per session than the
+transcript contains messages. Making the key `(user_id, session_id, sha)` would
+keep both properties; it is a schema change and has not been made.
+
 ## 4. Search
 
 ### Query planning

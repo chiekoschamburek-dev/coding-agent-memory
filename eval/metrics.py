@@ -23,8 +23,13 @@ labelled per session. The platform's ``top_k`` and token prefix both cut the
 entry list, so scoring only the session-collapsed list reports a recall the
 answer model cannot see. ``evaluate`` therefore scores any ranked sequence under
 each unit: pass ``key="ranked"`` for the session view and ``key="ranked_items"``
-for the entry view the platform actually truncates. Hit counts stay distinct
-under both, so an entry list full of repeat chunks earns no extra credit.
+for the entry view the platform actually truncates.
+
+Two of the three hit-based metrics count *distinct* sessions, so an entry list
+padded with repeats of one session cannot inflate them: ``recall_at_k`` takes a
+set intersection, and ``ndcg_at_k`` credits a document only on first appearance.
+``precision_at_k`` deliberately does not — it counts slots, because a repeated
+session consuming three of them is a real cost to the budget, not a free hit.
 """
 
 from __future__ import annotations
@@ -40,12 +45,22 @@ def recall_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
 
 
 def precision_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
+    """Fraction of the window's *slots* holding evidence from a relevant session.
+
+    Counted over the list, not over distinct ids. Three entries from one relevant
+    session occupy three slots, and how much of the budget a repeated session
+    consumes is precisely what this metric exists to show. Deduplicating here
+    would silently turn it into a different quantity — the density of *distinct*
+    relevant sessions — and would score a payload that spends two thirds of its
+    budget on repeats as though those slots were free. On the collapsed session
+    list the two definitions coincide, so this only affects the ``item_`` view.
+    """
     if k <= 0:
         return 0.0
     window = ranked[:k]
     if not window:
         return 0.0
-    return len(set(window) & relevant) / len(window)
+    return sum(1 for doc_id in window if doc_id in relevant) / len(window)
 
 
 def reciprocal_rank(ranked: Sequence[str], relevant: set[str]) -> float:

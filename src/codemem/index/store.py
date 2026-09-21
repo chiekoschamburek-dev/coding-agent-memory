@@ -535,6 +535,24 @@ class Store:
                 best[memory_id] = score
         return sorted(best.items(), key=lambda kv: -kv[1])[:limit]
 
+    def session_map(self, user_id: str, memory_ids: Sequence[int]) -> dict[int, str]:
+        """Batch memory_id -> session_id, for session-major candidate assembly.
+
+        One query per call rather than one per memory: the candidate pool is a
+        few hundred ids, and a per-id lookup would add that many round trips to
+        every search.
+        """
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id, session_id FROM memory WHERE user_id = ?"
+                f" AND id IN ({placeholders})",
+                (user_id, *memory_ids),
+            ).fetchall()
+        return {int(row["id"]): row["session_id"] for row in rows}
+
     def fetch_memories(self, user_id: str, memory_ids: Sequence[int]) -> dict[int, MemoryRow]:
         if not memory_ids:
             return {}
