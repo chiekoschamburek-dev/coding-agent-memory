@@ -18,6 +18,11 @@ output, so:
 * ``empty``     — fraction of queries returning nothing. High is not automatically
   bad (the noise gate is meant to abstain), but it is a ceiling on recall.
 
+Each ranking metric is reported twice, because the store returns several memory
+entries per session and only the ``item_`` rows reflect what a ``top_k`` cut or a
+token prefix actually delivers; the unprefixed rows collapse entries onto their
+session. See ``metrics`` for why both are needed.
+
 Usage::
 
     python eval/run_benchmark.py --data eval/data/benchmark.json
@@ -105,7 +110,6 @@ def run(
         # ---- Run queries -------------------------------------------------
         results: dict[str, dict] = {}
         empties = 0
-        returned_counts: list[int] = []
         search_times: list[float] = []
 
         for query in queries:
@@ -117,7 +121,6 @@ def run(
             )
             search_times.append(time.monotonic() - started)
             items = response.json().get("data", [])
-            returned_counts.append(len(items))
             if not items:
                 empties += 1
             lookup = mapping.get(user_id, {})
@@ -128,16 +131,27 @@ def run(
                 session = lookup.get(item["id"])
                 if session and session not in ranked:
                     ranked.append(session)
+            # The platform's unit is the memory entry, not the session: `top_k`
+            # counts `data[]` items and those items are what reach Answer, in
+            # order. Keeping the un-collapsed sequence lets the two accounting
+            # units be compared instead of silently assuming they agree.
+            ranked_items = [lookup.get(item["id"]) for item in items]
             results[query["query_id"]] = {
                 "ranked": ranked,
+                "ranked_items": ranked_items,
                 "relevant": set(query["relevant"]),
                 "repo": query["repo"],
             }
 
     metrics = evaluate(results, ks=ks)
+    metrics.update(evaluate(results, ks=ks, key="ranked_items", prefix="item_"))
     metrics["empty_rate"] = empties / len(queries) if queries else 0.0
-    metrics["avg_returned"] = (
-        statistics.fmean(returned_counts) if returned_counts else 0.0
+    avg_items = statistics.fmean(len(r["ranked_items"]) for r in results.values())
+    avg_sessions = statistics.fmean(len(r["ranked"]) for r in results.values())
+    metrics["avg_returned"] = avg_items
+    metrics["avg_sessions_returned"] = avg_sessions
+    metrics["items_per_session"] = (
+        round(avg_items / avg_sessions, 2) if avg_sessions else 0.0
     )
     metrics["add_seconds"] = round(add_seconds, 1)
     metrics["search_mean_ms"] = (
@@ -216,7 +230,7 @@ def report(out: dict, *, ks: tuple[int, ...], meta: dict) -> None:
     print(f"add time       : {out['metrics']['add_seconds']}s")
     print(f"search latency : {metrics['search_mean_ms']}ms mean")
     print()
-    header = f"{'metric':<16}{'random':>10}{'codemem':>12}{'lift':>10}"
+    header = f"{'metric':<22}{'random':>10}{'codemem':>12}{'lift':>10}"
     print(header)
     print("-" * len(header))
     for key in sorted(metrics):
@@ -226,10 +240,21 @@ def report(out: dict, *, ks: tuple[int, ...], meta: dict) -> None:
         base = baseline.get(key)
         if isinstance(base, float):
             lift = f"{value - base:+.4f}" if isinstance(value, float) else "-"
-            print(f"{key:<16}{base:>10.4f}{value:>12.4f}{lift:>10}")
+            print(f"{key:<22}{base:>10.4f}{value:>12.4f}{lift:>10}")
         else:
             shown = f"{value:.4f}" if isinstance(value, float) else str(value)
-            print(f"{key:<16}{'-':>10}{shown:>12}{'-':>10}")
+            print(f"{key:<22}{'-':>10}{shown:>12}{'-':>10}")
+
+    print()
+    for line in _wrap(
+        "Unprefixed rows collapse data[] entries onto their source session; "
+        "item_ rows score the entry list itself, which is what top_k and the "
+        "answer model's token prefix cut. Both count distinct sessions, so "
+        "repeat chunks of one session never earn extra credit. The random "
+        "baseline is a session ordering, so it has no item_ counterpart.",
+        64,
+    ):
+        print(f"  {line}")
 
     print()
     print("relevance definition (our proxy):")
@@ -318,11 +343,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dump_per_query:
         args.dump_per_query.parent.mkdir(parents=True, exist_ok=True)
+        # Relevance is "touched at least one shared file", which makes a pair
+        # that shares three files and one that shares a single hot file equally
+        # "relevant" in the metrics. Dumping the overlap lets a low recall@k be
+        # split into "weak labels we cannot reasonably rank" and "strong matches
+        # we actually mis-ranked" — without it, recall@k is unactionable.
+        session_files = {
+            m["session_id"]: set(m.get("files") or ()) for m in data["memories"]
+        }
         detail = []
         for query in data["queries"]:
             if query["query_id"] not in out["results"]:
                 continue
             result = out["results"][query["query_id"]]
+            query_files = set(query.get("files") or ())
+            overlap = {
+                session: len(query_files & session_files.get(session, set()))
+                for session in result["relevant"]
+            }
             detail.append(
                 {
                     "query_id": query["query_id"],
@@ -337,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         None,
                     ),
+                    "ranked": result["ranked"],
+                    "ranked_items": result["ranked_items"],
+                    "relevant_overlap": overlap,
                     "query": query["query"][:300],
                 }
             )

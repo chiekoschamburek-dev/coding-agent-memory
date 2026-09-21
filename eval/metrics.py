@@ -14,6 +14,17 @@ the answer model receives a token-counted prefix of our ranked output:
 
 All are query-averaged. Relevant ids are supplied per query by the benchmark
 builder; this module knows nothing about how relevance was determined.
+
+Two accounting units
+--------------------
+``/search`` returns ``data[]`` *memory entries*, and several entries come from the
+same session (roughly two per session on this corpus), while relevance is
+labelled per session. The platform's ``top_k`` and token prefix both cut the
+entry list, so scoring only the session-collapsed list reports a recall the
+answer model cannot see. ``evaluate`` therefore scores any ranked sequence under
+each unit: pass ``key="ranked"`` for the session view and ``key="ranked_items"``
+for the entry view the platform actually truncates. Hit counts stay distinct
+under both, so an entry list full of repeat chunks earns no extra credit.
 """
 
 from __future__ import annotations
@@ -25,8 +36,7 @@ from collections.abc import Iterable, Sequence
 def recall_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
     if not relevant:
         return 0.0
-    found = sum(1 for doc_id in ranked[:k] if doc_id in relevant)
-    return found / len(relevant)
+    return len(set(ranked[:k]) & relevant) / len(relevant)
 
 
 def precision_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
@@ -35,7 +45,7 @@ def precision_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
     window = ranked[:k]
     if not window:
         return 0.0
-    return sum(1 for doc_id in window if doc_id in relevant) / len(window)
+    return len(set(window) & relevant) / len(window)
 
 
 def reciprocal_rank(ranked: Sequence[str], relevant: set[str]) -> float:
@@ -51,8 +61,10 @@ def ndcg_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
 
     def dcg(items: Iterable[str]) -> float:
         total = 0.0
+        seen: set[str] = set()
         for rank, doc_id in enumerate(items, start=1):
-            gain = 1.0 if doc_id in relevant else 0.0
+            gain = 1.0 if doc_id in relevant and doc_id not in seen else 0.0
+            seen.add(doc_id)
             total += gain / math.log2(rank + 1)
         return total
 
@@ -62,31 +74,41 @@ def ndcg_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
 
 
 def evaluate(
-    results: dict[str, dict], *, ks: Sequence[int] = (10, 100)
+    results: dict[str, dict],
+    *,
+    ks: Sequence[int] = (10, 100),
+    key: str = "ranked",
+    prefix: str = "",
 ) -> dict[str, float]:
     """Aggregate metrics over a query set.
 
     ``results`` maps query_id to ``{"ranked": [doc_id, ...], "relevant": {...}}``.
+    ``key`` selects which ranked sequence to score and ``prefix`` namespaces the
+    output keys, so the session view and the memory-entry view of the same run
+    can sit in one result dict. Response-level rates are only reported for the
+    unprefixed pass because they describe the response, not the ranking unit.
     """
     if not results:
         return {}
     out: dict[str, float] = {}
     for k in ks:
-        out[f"recall@{k}"] = _mean(
-            recall_at_k(r["ranked"], set(r["relevant"]), k) for r in results.values()
+        out[f"{prefix}recall@{k}"] = _mean(
+            recall_at_k(r[key], set(r["relevant"]), k) for r in results.values()
         )
-        out[f"ndcg@{k}"] = _mean(
-            ndcg_at_k(r["ranked"], set(r["relevant"]), k) for r in results.values()
+        out[f"{prefix}ndcg@{k}"] = _mean(
+            ndcg_at_k(r[key], set(r["relevant"]), k) for r in results.values()
         )
-        out[f"precision@{k}"] = _mean(
-            precision_at_k(r["ranked"], set(r["relevant"]), k) for r in results.values()
+        out[f"{prefix}precision@{k}"] = _mean(
+            precision_at_k(r[key], set(r["relevant"]), k) for r in results.values()
         )
-    out["mrr"] = _mean(
-        reciprocal_rank(r["ranked"], set(r["relevant"])) for r in results.values()
+    out[f"{prefix}mrr"] = _mean(
+        reciprocal_rank(r[key], set(r["relevant"])) for r in results.values()
     )
-    detected = sum(1 for r in results.values() if r["ranked"])
+    if prefix:
+        return out
+    detected = sum(1 for r in results.values() if r[key])
     out["detection_rate"] = detected / len(results)
-    out["avg_returned"] = _mean(len(r["ranked"]) for r in results.values())
+    out["avg_returned"] = _mean(len(r[key]) for r in results.values())
     return out
 
 
