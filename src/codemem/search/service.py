@@ -13,7 +13,7 @@ import time
 from ..core.config import Settings
 from ..core.logging import get_logger
 from ..index.store import MemoryRow, Store
-from .evidence import EvidenceItem, assemble, score_candidates
+from .evidence import EvidenceItem, _select_span, assemble, score_candidates
 from .query import plan_query
 from .retriever import Retriever
 
@@ -106,6 +106,44 @@ class SearchPipeline:
         )
         return items
 
+    def _rerank_body(self, memory: MemoryRow, plan: QueryPlan) -> str:
+        """The text the cross-encoder reads for one memory.
+
+        A character prefix is the wrong window on a long trajectory: it keeps
+        whichever lines happen to come first, not the ones that match, and the
+        listwise experiment already showed the judge gets better when it sees
+        more of the relevant excerpt. With ``rerank_span_tokens`` set, the
+        window is chosen the same way the returned item's content is — by
+        query-term density with operative lines weighted — so the stage scores
+        the part of the memory that is actually on topic.
+        """
+        budget = self.settings.rerank_span_tokens
+        if budget <= 0:
+            return memory.text[: self.settings.rerank_max_chars]
+        span, _ = _select_span(
+            memory.text,
+            budget,
+            plan.keywords,
+            self.settings.evidence_operative_weight,
+        )
+        return span
+
+    def _normalize_scores(self, scores: list[float]) -> list[float]:
+        """Map cross-encoder output onto the 0..1 scale the blend expects.
+
+        Most cross-encoders emit an unbounded logit, which a fixed temperature
+        turns into a contribution that does not depend on the pool. Some (the
+        bge-reranker family) emit a 0..1 relevance score already; putting those
+        through the same sigmoid flattens every candidate towards 0.5 and
+        destroys the ordering, so they are taken as they come.
+        """
+        if self.settings.rerank_probability_scores:
+            return [min(1.0, max(0.0, s)) for s in scores]
+        from ..rerank import sigmoid
+
+        temperature = self.settings.rerank_temperature
+        return [sigmoid(s / temperature) for s in scores]
+
     def _rerank(
         self,
         user_id: str,
@@ -133,14 +171,13 @@ class SearchPipeline:
                 continue
             # Include the deterministic header fields so the cross-encoder sees
             # the identifiers too, not only prose.
-            body = memory.text[: self.settings.rerank_max_chars]
-            texts.append(f"{memory.structural_kind}: {body}")
+            texts.append(
+                f"{memory.structural_kind}: {self._rerank_body(memory, plan)}"
+            )
 
         scores = self.reranker.score(plan.query, texts)
         if not scores or len(scores) != len(head):
             return scored
-
-        from ..rerank import sigmoid
 
         # Temperature-scaled sigmoid, NOT max-normalised.
         #
@@ -150,8 +187,7 @@ class SearchPipeline:
         # top_n=60 scored 0.772, top_n=120 scored 0.818 — an incoherent
         # sequence). A fixed temperature keeps the mapping absolute: the same
         # logit always yields the same contribution, whatever the pool size.
-        temperature = self.settings.rerank_temperature
-        normalized = [sigmoid(s / temperature) for s in scores]
+        normalized = self._normalize_scores(scores)
 
         weight = self.settings.rerank_weight
         for cand, rerank_score in zip(head, normalized):
@@ -204,8 +240,7 @@ class SearchPipeline:
             memory = memories.get(cand.memory_id)
             if memory is None:
                 return ""
-            body = memory.text[: self.settings.rerank_max_chars]
-            return f"{memory.structural_kind}: {body}"
+            return f"{memory.structural_kind}: {self._rerank_body(memory, plan)}"
 
         # ``scored`` is sorted, so a session's first entry is its strongest.
         # That is the representative the cross-encoder reads.
@@ -220,10 +255,7 @@ class SearchPipeline:
         if not scores or len(scores) != len(targets):
             return scored
 
-        from ..rerank import sigmoid
-
-        temperature = self.settings.rerank_temperature
-        normalized = [sigmoid(s / temperature) for s in scores]
+        normalized = self._normalize_scores(scores)
 
         weight = self.settings.rerank_weight
         for group, rerank_score in zip(targets, normalized):

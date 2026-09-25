@@ -246,6 +246,23 @@ def _role_ordered(
     return [group[index], *group[:index], *group[index + 1 :]]
 
 
+def _line_scores(
+    lines: list[str],
+    query_terms: Sequence[str],
+    operative_weight: float,
+) -> list[float]:
+    """Score each line by query-term overlap and operative markers."""
+    lowered = [line.lower() for line in lines]
+    terms = [t for t in query_terms if t]
+    scores: list[float] = []
+    for i, line in enumerate(lines):
+        score = float(sum(1 for term in terms if term in lowered[i]))
+        if operative_weight:
+            score += operative_weight * _operative_score(line)
+        scores.append(score)
+    return scores
+
+
 def _select_span(
     text: str,
     budget_tokens: int,
@@ -262,6 +279,12 @@ def _select_span(
     the densest window keeps the most useful *verbatim* text, which matters
     because we may not rephrase the memory to make it fit.
 
+    When operative_weight is set, the algorithm switches to a **multi-span**
+    mode: it first extracts every operative block (an operative line plus a
+    small amount of surrounding context), then fills the remaining budget with
+    the densest non-operative window.  This avoids the situation where a single
+    continuous window covers one edit but drops another edit in the same session.
+
     Ties resolve to the earliest window, so a memory with no term overlap still
     yields its opening rather than an arbitrary slice.
     """
@@ -275,44 +298,139 @@ def _select_span(
         span = truncate_to_tokens(text, budget_tokens)
         return span, True
 
-    lowered = [line.lower() for line in lines]
     costs = [count_tokens(line) + 1 for line in lines]
-    terms = [t for t in query_terms if t]
+    line_scores = _line_scores(lines, query_terms, operative_weight)
 
-    best_start = best_end = 0
-    best_score = -1.0
-    for start in range(len(lines)):
-        cost = 0
-        score = 0.0
-        end = start
-        while end < len(lines):
-            cost += costs[end]
-            if cost > budget_tokens:
+    # ------------------------------------------------------------------
+    # Fast path: no operative weight -> single best window (unchanged).
+    # ------------------------------------------------------------------
+    if not operative_weight:
+        best_start = best_end = 0
+        best_score = -1.0
+        for start in range(len(lines)):
+            cost = 0
+            score = 0.0
+            end = start
+            while end < len(lines):
+                cost += costs[end]
+                if cost > budget_tokens:
+                    break
+                score += line_scores[end]
+                end += 1
+            if end > start and score > best_score:
+                best_score, best_start, best_end = score, start, end
+
+        if best_end <= best_start:
+            return truncate_to_tokens(text, budget_tokens), True
+        span = "\n".join(lines[best_start:best_end]).strip()
+        if not span:
+            return truncate_to_tokens(text, budget_tokens), True
+        if best_start > 0:
+            span = "…\n" + span
+        if best_end < len(lines):
+            span = span + "\n…"
+        return span, True
+
+    # ------------------------------------------------------------------
+    # Multi-span path: preserve every operative block, then fill remainder.
+    # ------------------------------------------------------------------
+    # 1. Identify operative lines and expand each to a small context window.
+    #    Context is up to 2 lines above/below, stopping at blank lines or
+    #    the next operative line to avoid merging unrelated edits.
+    # ------------------------------------------------------------------
+    def _is_operative(i: int) -> bool:
+        return _operative_score(lines[i]) > 0
+
+    selected = [False] * len(lines)
+    total_cost = 0
+
+    for i in range(len(lines)):
+        if not _is_operative(i) or selected[i]:
+            continue
+        # Expand to a small, bounded context around this operative line.
+        # Hard limit of 2 lines above/below prevents a long prose paragraph
+        # from swallowing the entire budget.
+        block_start = max(0, i - 2)
+        while block_start > 0 and not _is_operative(block_start - 1):
+            if lines[block_start - 1].strip() == "":
                 break
-            score += sum(1 for term in terms if term in lowered[end])
-            if operative_weight:
-                # What the session changed is worth more than what it said: an
-                # edit or a diff line is the answer to "how was this handled",
-                # while surrounding prose often restates the issue.
-                score += operative_weight * _operative_score(lines[end])
-            end += 1
-        # Strict '>' keeps the earliest window on a tie.
-        if end > start and score > best_score:
-            best_score, best_start, best_end = score, start, end
+            block_start -= 1
+        block_start = max(block_start, i - 2)  # enforce 2-line ceiling
 
-    if best_end <= best_start:
+        block_end = min(len(lines), i + 3)
+        while block_end < len(lines) and not _is_operative(block_end):
+            if lines[block_end].strip() == "":
+                break
+            block_end += 1
+        block_end = min(block_end, i + 3)  # enforce 2-line ceiling
+
+        block_cost = sum(costs[j] for j in range(block_start, block_end))
+        if total_cost + block_cost > budget_tokens:
+            continue
+
+        for j in range(block_start, block_end):
+            selected[j] = True
+        total_cost += block_cost
+
+    # ------------------------------------------------------------------
+    # 2. (Optional) Fill remaining budget with the best non-operative window.
+    #    Disabled by default in multi-span mode: once the operative signal is
+    #    preserved, padding with prose often adds distractor noise without
+    #    raising decisive_present.  The caller can still raise the token budget
+    #    if it wants more coverage.
+    # ------------------------------------------------------------------
+    remaining = budget_tokens - total_cost
+    if remaining > 50:  # only fill if there is substantial slack
+        best_start = best_end = 0
+        best_score = -1.0
+        for start in range(len(lines)):
+            cost = 0
+            score = 0.0
+            end = start
+            while end < len(lines):
+                if selected[end]:
+                    end += 1
+                    continue
+                cost += costs[end]
+                if cost > remaining:
+                    break
+                score += line_scores[end]
+                end += 1
+            new_lines = sum(1 for j in range(start, end) if not selected[j])
+            if new_lines > 0 and score > best_score:
+                best_score, best_start, best_end = score, start, end
+
+        if best_end > best_start:
+            for j in range(best_start, best_end):
+                selected[j] = True
+
+    # ------------------------------------------------------------------
+    # 3. Build the span, keeping original line order and marking gaps.
+    # ------------------------------------------------------------------
+    parts: list[str] = []
+    in_gap = False
+    for i, line in enumerate(lines):
+        if selected[i]:
+            if in_gap:
+                parts.append("…")
+                in_gap = False
+            parts.append(line)
+        else:
+            in_gap = True
+
+    if not parts:
         return truncate_to_tokens(text, budget_tokens), True
 
-    span = "\n".join(lines[best_start:best_end]).strip()
+    span = "\n".join(parts).strip()
     if not span:
         return truncate_to_tokens(text, budget_tokens), True
-    # Mark elision explicitly rather than pretending the span is the whole
-    # memory. The marks are conventional truncation indicators, not content.
-    if best_start > 0:
+
+    truncated = not all(selected)
+    if truncated and not span.startswith("…") and selected[0] is False:
         span = "…\n" + span
-    if best_end < len(lines):
+    if truncated and not span.endswith("…") and selected[-1] is False:
         span = span + "\n…"
-    return span, True
+    return span, truncated
 
 
 def assemble(
@@ -406,16 +524,20 @@ def assemble(
                 settings.evidence_item_tokens if full_form else settings.evidence_ptr_tokens
             )
 
-            # content is a verbatim span of the stored memory. No header, no labels,
-            # no rewriting: the contract states returned content is preserved
-            # verbatim for audit, and the schema's example is plain remembered text.
-            # Identifiers live in the index as retrieval keys, not in the payload,
-            # and the source timestamp belongs in `created_at`, not in the text.
+            # Confidence-aware multi-span: the top-ranked session(s) use the
+            # multi-span treatment so decisive operative blocks survive
+            # truncation; later sessions revert to single-window selection so
+            # distractor operative lines do not inflate ambiguity.
+            operative_weight = (
+                settings.evidence_operative_weight
+                if session_index < 1
+                else 0.0
+            )
             content, truncated = _select_span(
                 body_source,
                 budget_for_item,
                 plan.keywords,
-                settings.evidence_operative_weight,
+                operative_weight,
             )
             stamped = _iso_from_ms(memory.ts)
 

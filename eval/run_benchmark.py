@@ -317,6 +317,14 @@ def main(argv: list[str] | None = None) -> int:
                              "instead of one per entry")
     parser.add_argument("--rerank-weight", type=float, default=None,
                         help="blend weight of the cross-encoder score")
+    parser.add_argument("--rerank-model", type=str, default=None,
+                        help="cross-encoder used by the reranking stage")
+    parser.add_argument("--rerank-probability-scores", action="store_true",
+                        help="the cross-encoder already emits 0..1 relevance, "
+                             "so skip the temperature sigmoid")
+    parser.add_argument("--rerank-span-tokens", type=int, default=None,
+                        help="select the cross-encoder document by query-term "
+                             "density instead of taking a character prefix")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -346,6 +354,12 @@ def main(argv: list[str] | None = None) -> int:
         overrides["rerank_session_level"] = True
     if args.rerank_weight is not None:
         overrides["rerank_weight"] = args.rerank_weight
+    if args.rerank_model is not None:
+        overrides["rerank_model"] = args.rerank_model
+    if args.rerank_probability_scores:
+        overrides["rerank_probability_scores"] = True
+    if args.rerank_span_tokens is not None:
+        overrides["rerank_span_tokens"] = args.rerank_span_tokens
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

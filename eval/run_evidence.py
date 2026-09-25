@@ -331,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ptr-tokens", type=int, default=None)
     parser.add_argument("--operative-weight", type=float, default=None)
     parser.add_argument("--max-sessions", type=int, default=None)
+    parser.add_argument("--operative-promotion", type=int, default=None,
+                        help="override evidence_operative_promotion (-1=all, 0=never, N=top N)")
     parser.add_argument("--cap", type=int, default=None,
                         help="override max_evidence_per_session")
     parser.add_argument(
@@ -367,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_ptr_tokens"] = args.ptr_tokens
     if args.operative_weight is not None:
         overrides["evidence_operative_weight"] = args.operative_weight
+    if args.operative_promotion is not None:
+        overrides["evidence_operative_promotion"] = args.operative_promotion
     if args.max_sessions is not None:
         overrides["evidence_max_sessions"] = args.max_sessions
     if args.cap is not None:

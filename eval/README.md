@@ -780,6 +780,26 @@ number to the digit (MRR 0.7922, recall@10 0.7344, item recall@10 0.5823,
 items/session 2.07, 59.2 items returned). Only the text each item carries
 changes.
 
+**Selecting the cross-encoder's window instead of truncating it: measured, no
+effect.** The listwise experiment above found that a judge scores better with a
+longer excerpt, which suggested the cross-encoder was reading the wrong text:
+it gets `text[:rerank_max_chars]`, i.e. the *opening* of a memory rather than
+the part that matches. `rerank_span_tokens` replaces that prefix with the
+query-term-density window `_select_span` already uses for returned content.
+
+| | MRR | nDCG@10 | recall@10 | item MRR | item recall@10 |
+|---|---|---|---|---|---|
+| prefix (default) | 0.7922 | 0.6787 | 0.7344 | 0.7424 | 0.5823 |
+| span, 200 tokens | 0.7850 | 0.6753 | 0.7277 | 0.7329 | 0.5869 |
+
+Paired bootstrap: MRR −0.0071 (p=0.63), item recall@10 +0.0047 (p=0.58),
+session recall@10 −0.0067 (p=0.50) — and only 7–10 of 89 queries change at all.
+That is the explanation, not just the verdict: on this corpus a memory entry is
+a median of 151 characters, so `rerank_max_chars` 2000 already covers most of
+them whole and there is no wrong-window problem to fix, while a 200-token
+selection *shortens* the long ones. It also costs latency (`_select_span` runs
+per candidate; search mean 2.20 s against 1.49 s). Left off by default.
+
 ### Evidence sufficiency: the deterministic metric to tune against
 
 `eval/run_evidence.py` measures what our Search output actually carries, with no

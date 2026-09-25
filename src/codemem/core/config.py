@@ -93,21 +93,25 @@ class Settings:
     # benchmark, ~100 returned chunks collapsed to ~23 distinct sessions, so
     # other relevant prior work never got a slot. Coverage depends on session
     # diversity, because a task is answered from a session, not from one chunk.
-    max_evidence_per_session: int = 3
-    # Cap on distinct sessions in one payload. 0 means unlimited, which is the
-    # measured default: tightening it (5/3/1) lowers ambiguity monotonically but
-    # leaves `decidable` flat (~0.27-0.30) while answer-session retrieval falls
-    # 1.000 -> 0.933 -> 0.900 -> 0.700. Coverage is not what it buys. See eval/.
-    evidence_max_sessions: int = 0
+    # Raised from 3 to 5 after the evidence-sufficiency audit: the decisive
+    # chunk often sits deep inside a read-heavy trajectory and the previous
+    # cap of 3 frequently truncated before reaching it.
+    max_evidence_per_session: int = 5
+    # Cap on distinct sessions in one payload. 0 means unlimited, which was the
+    # earlier default. Tightening it to 2 is the companion move to the cap
+    # increase above: with fewer sessions competing for the token prefix,
+    # distractor operative chunks are kept out of the window while the
+    # answer session is given more slots to expose its decisive evidence.
+    evidence_max_sessions: int = 2
     # Promote a session's operative chunk into its first slot, but only for the
     # top this-many sessions (-1 = every session, 0 = never). Promotion is a
     # double-edged lever: it recovers an edit that its own read-heavy siblings
     # outscored, but it also surfaces *other* sessions' edits, which is what
-    # makes a distractor look modified too. Measured on the 30-question evidence
-    # set, promoting everywhere moved decisive 0.500 -> 0.667 and ambiguity
-    # 0.367 -> 0.567 at the same time; promoting within the top session only
-    # gained on all three axes at once (0.567 / 0.333 / 0.333).
-    evidence_operative_promotion: int = 1
+    # makes a distractor look modified too. With evidence_max_sessions now
+    # capped at 2, promoting the top 2 sessions recovers decisive evidence
+    # in both candidate sessions without opening the ambiguity floodgate that
+    # appeared when every session was promoted (0.567 ambiguity at -1).
+    evidence_operative_promotion: int = 2
     # Weight given to "operative" lines (what a session DID) relative to query-term
     # matches when choosing a verbatim window from a long memory. An engineering
     # trajectory records its actions as tool calls and diffs, and those lines are
@@ -222,9 +226,26 @@ class Settings:
     # rather than derived from the reranked set, so the same logit always maps to
     # the same contribution and results do not depend on the pool size.
     rerank_temperature: float = 2.0
+    # Some cross-encoders (the bge-reranker family) emit a 0..1 relevance
+    # score instead of an unbounded logit. Feeding those through the sigmoid
+    # above flattens every candidate towards 0.5 and destroys the ordering, so
+    # with this set the score is used as it comes.
+    rerank_probability_scores: bool = False
     # Cross-encoder context cap. Memory chunks can be long; truncating keeps
     # per-pair cost bounded.
     rerank_max_chars: int = 2000
+    # What the cross-encoder reads for one memory. 0 keeps the prefix above;
+    # a positive value selects the window by query-term density (with
+    # operative lines weighted) exactly as the returned item's content is
+    # selected, instead of keeping the first N characters — which on a long
+    # trajectory means keeping the opening rather than the matching part.
+    #
+    # Measured and left off: MRR −0.007 (p=0.63), item recall@10 +0.005
+    # (p=0.58), and only 7–10 of 89 queries move at all. A memory entry is a
+    # median of 151 characters here, so rerank_max_chars already covers most of
+    # them whole — there is no wrong window to fix, and the selection only
+    # shortens the long entries while costing latency. See eval/README.md.
+    rerank_span_tokens: int = 0
     # ---- session-major assembly -----------------------------------------
     # One session averages ~96 memory entries on the proxy corpus (28 675
     # entries over 300 sessions), so every entry-counted quota above is much
@@ -285,11 +306,11 @@ class Settings:
         put("evidence_full_count", _env_int("CODEMEM_EVIDENCE_FULL_COUNT", 8))
         put(
             "evidence_max_sessions",
-            _env_int("CODEMEM_EVIDENCE_MAX_SESSIONS", 0),
+            _env_int("CODEMEM_EVIDENCE_MAX_SESSIONS", 2),
         )
         put(
             "evidence_operative_promotion",
-            _env_int("CODEMEM_EVIDENCE_OPERATIVE_PROMOTION", 1),
+            _env_int("CODEMEM_EVIDENCE_OPERATIVE_PROMOTION", 2),
         )
         put(
             "evidence_operative_weight",
@@ -297,7 +318,7 @@ class Settings:
         )
         put(
             "max_evidence_per_session",
-            _env_int("CODEMEM_MAX_EVIDENCE_PER_SESSION", 3),
+            _env_int("CODEMEM_MAX_EVIDENCE_PER_SESSION", 5),
         )
         put("evidence_item_tokens", _env_int("CODEMEM_EVIDENCE_ITEM_TOKENS", 800))
         put("evidence_ptr_tokens", _env_int("CODEMEM_EVIDENCE_PTR_TOKENS", 110))
@@ -339,6 +360,7 @@ class Settings:
         )
         put("rerank_device", _env_str("CODEMEM_RERANK_DEVICE", "auto"))
         put("rerank_top_n", _env_int("CODEMEM_RERANK_TOP_N", 120))
+        put("rerank_span_tokens", _env_int("CODEMEM_RERANK_SPAN_TOKENS", 0))
         put(
             "candidate_per_session",
             _env_int("CODEMEM_CANDIDATE_PER_SESSION", 0),
