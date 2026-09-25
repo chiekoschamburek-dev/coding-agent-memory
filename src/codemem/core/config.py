@@ -191,6 +191,10 @@ class Settings:
     # laptop GPU: embedding 14 -> 112 docs/s and reranking 15.9 -> 2.0 ms/doc,
     # which is the difference between dense Add taking ~850 s and ~110 s.
     embed_device: str = "auto"
+    # Base URL for the `openai` embed backend only. Previously read directly
+    # from the environment inside the encoder, which kept it out of Settings
+    # and therefore out of .env.example.
+    embed_base_url: str | None = None
     embed_batch_size: int = 16
     # Load the encoder from the local cache only. Default true because a
     # deployment host may have no route to huggingface.co, where model loading
@@ -347,6 +351,7 @@ class Settings:
         put("embed_backend", _env_str("CODEMEM_EMBED_BACKEND", "local"))
         put("embed_model", _env_str("CODEMEM_EMBED_MODEL", "BAAI/bge-small-en-v1.5"))
         put("embed_device", _env_str("CODEMEM_EMBED_DEVICE", "auto"))
+        put("embed_base_url", _env_str("CODEMEM_EMBED_BASE_URL", None))
         put("embed_offline", _env_bool("CODEMEM_EMBED_OFFLINE", True))
         put(
             "dense_min_similarity",

@@ -96,7 +96,7 @@ cp .env.example .env    # 然后编辑；切勿提交该文件
 | `CODEMEM_DENSE_ENABLED` | `true` | 稠密召回；见下方硬件说明 |
 | `CODEMEM_RERANK_ENABLED` | `true` | 交叉编码器重排；实测增益最大的一项 |
 | `CODEMEM_EMBED_DEVICE` / `CODEMEM_RERANK_DEVICE` | `auto` | 可见 CUDA 时用 GPU，否则 CPU（相差约 8 倍） |
-| `CODEMEM_MAX_EVIDENCE_PER_SESSION` | `3` | 单会话多样性上限；见 `eval/README.md` |
+| `CODEMEM_MAX_EVIDENCE_PER_SESSION` | `5` | 单会话多样性上限；与 `CODEMEM_EVIDENCE_MAX_SESSIONS` 配套调整，见 `eval/README.md` |
 | `CODEMEM_MIN_EVIDENCE_SCORE` | `0.15` | 噪声门；用 `eval/` 校准 |
 | `CODEMEM_EVIDENCE_BUDGET_TOKENS` | `60000` | 载荷总预算，远低于 117,760 的输入窗口 |
 

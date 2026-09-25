@@ -32,7 +32,10 @@ services:
       CODEMEM_LLM_MODEL: "${CODEMEM_LLM_MODEL:-gpt-4o-mini}"
 
       # Answer enrichment budget knobs, if tuning against the benchmark.
-      CODEMEM_MAX_EVIDENCE_PER_SESSION: "${CODEMEM_MAX_EVIDENCE_PER_SESSION:-3}"
+      # Defaults here mirror Settings; `:-` fallbacks must not lag behind the
+      # code, or a Compose deployment silently runs a superseded value.
+      CODEMEM_MAX_EVIDENCE_PER_SESSION: "${CODEMEM_MAX_EVIDENCE_PER_SESSION:-5}"
+      CODEMEM_EVIDENCE_MAX_SESSIONS: "${CODEMEM_EVIDENCE_MAX_SESSIONS:-2}"
       CODEMEM_MIN_EVIDENCE_SCORE: "${CODEMEM_MIN_EVIDENCE_SCORE:-0.15}"
     healthcheck:
       # /health reports whether the models actually loaded, so a silent fallback

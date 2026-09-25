@@ -138,6 +138,7 @@ class Encoder:
     device: str
     batch_size: int
     offline: bool = True
+    base_url: str | None = None
     _model: object | None = None
     _dim: int = 0
     _failed: bool = False
@@ -238,7 +239,8 @@ class Encoder:
 
         client = OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEMEM_LLM_API_KEY"),
-            base_url=os.environ.get("CODEMEM_EMBED_BASE_URL")
+            base_url=self.base_url
+            or os.environ.get("CODEMEM_EMBED_BASE_URL")
             or os.environ.get("OPENAI_BASE_URL"),
         )
         return client
@@ -310,6 +312,7 @@ class Instance:
             device=settings.embed_device,
             batch_size=settings.embed_batch_size,
             offline=settings.embed_offline,
+            base_url=settings.embed_base_url,
         )
 
     @classmethod
@@ -321,6 +324,7 @@ class Instance:
             settings.embed_device,
             settings.embed_batch_size,
             settings.embed_offline,
+            settings.embed_base_url,
         )
 
     @classmethod
