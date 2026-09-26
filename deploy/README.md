@@ -5,9 +5,32 @@ HTTP(S). It rejects targets with embedded credentials and those pointing at
 private, loopback, or link-local addresses, and requires the endpoint to stay
 available for at least 30 days.
 
+**As of 2026-09-26 every track must self-host.** The organisers withdrew the
+"submit code, the platform builds it" path: the repository and the image are
+disclosure material and do not substitute for a deployed endpoint. One of the
+options below is therefore a submission prerequisite, not an option.
+
 GitHub is used for code hosting, CI, and image publication. It **cannot** host
 the service: Pages serves static files only, Actions is a job runner rather than
 a server, and Codespaces port forwarding is authenticated and sleeps when idle.
+
+## What cannot front this API
+
+Add is synchronous. The internal guard is 1 500 s against the contract's
+30-minute ceiling, and a large Add really can be a multi-minute connection that
+returns nothing until it completes. So:
+
+- **A CDN or edge proxy is unsafe here.** Alibaba Cloud ESA, for instance, caps
+  the full-chain back-to-origin timeout at **300 s** (default 30 s, documented
+  guidance "do not exceed 60 s") — far below a worst-case Add, so the platform
+  would see a gateway error and record a failed submission. Its edge functions
+  run JavaScript only, so it cannot host the container either.
+- **A load balancer needs its idle timeout checked, not just its existence.**
+  Four-layer LBs commonly idle out around 900 s, which also cuts a long Add.
+- **Expose the container port directly on a VM.** `ECS:8080` behind a security
+  group plus `CODEMEM_API_KEY` removes this whole failure class. If TLS or a
+  domain is genuinely required, set the proxy read timeout above 1 800 s and
+  confirm with a deliberately slow Add rather than assuming.
 
 ## The image is host-agnostic
 
@@ -29,15 +52,37 @@ curl -fsS http://127.0.0.1:8080/health
 
 ## Ingress options
 
-Pick one; switching later is cheap because only the reverse proxy changes.
+Pick one. The service is one container with an embedded database, so moving
+between these later means changing only where `docker run` happens.
 
-### A. Small cloud VM + domain + automatic HTTPS (recommended)
+### Sizing, measured on the proxy corpus
 
-A 2 vCPU / 4 GB instance and a cheap domain, roughly ¥100–200/year. The most
-stable option and the easiest to keep up for 30 days. Caddy obtains and renews
-certificates automatically.
+| need | evidence |
+|---|---|
+| Disk | 20 sessions produced a 16.6 MB database (1 904 memories) — about 250 MB per 300 sessions, 2.5 GB per 3 000. Vectors add ~1.5 KB per memory. The image itself is ~3–4 GB CPU, 10 GB+ GPU. A 40 GB system disk is ample. |
+| RAM | Torch plus the two small encoders (bge-small 33M, MiniLM-L6 22M) holds roughly 1.5–2 GB resident; 8 GiB leaves room for a concurrent Add while searches run. |
+| Add latency | Lexical path ~1.5 s per session; with dense enabled on CPU ~2.8 s per Add (300 Adds in ~850 s), against a 30-minute ceiling. |
+| Search latency | 47 ms with the deterministic channels; ~1.9 s with the 120-document cross-encoder pool on CPU (15.9 ms/doc), ~0.67 s with dense+rerank on GPU. |
 
-`deploy/Caddyfile`:
+So **4 vCPU / 8 GiB is the comfortable floor for the full ranking**. A 2 vCPU /
+4 GiB box is fine with `CODEMEM_DENSE_ENABLED=false` — measured on CPU, dense
+added no metric gain for ~5x the Add cost, so turning it off there costs nothing.
+1–2 GiB free tiers can only run the deterministic path
+(`CODEMEM_RERANK_ENABLED=false` as well): MRR 0.7248 instead of 0.7718, which is
+compliant but weaker.
+
+### A. Small cloud VM, port exposed directly (recommended)
+
+A 4 vCPU / 8 GiB economy instance, pay-as-you-go or annual (check the current
+price on the vendor page). The most stable option and the easiest to keep up for
+30 days: security group opens 8080, `CODEMEM_API_KEY` is set, and nothing sits
+between the platform and uvicorn — which is what avoids the timeout class
+described above.
+
+A domain plus Caddy is optional, for TLS only. Caddy applies no response timeout
+unless you configure one, so it does not cut a long Add; nginx by contrast
+defaults `proxy_read_timeout` to 60 s and **will** kill it, so behind nginx set
+that above 1 800 s and verify with a deliberately slow Add. `deploy/Caddyfile`:
 
 ```
 your-domain.example {
@@ -45,19 +90,22 @@ your-domain.example {
 }
 ```
 
-Then run the compose file plus Caddy on the same Docker network, and add
-`CODEMEM_API_KEY`.
+Then run the compose file plus Caddy on the same Docker network.
 
 ### B. Oracle Cloud Always Free VM
 
-A genuinely free VM tier, at the cost of a more involved signup. Same procedure
-as A once the instance exists.
+A genuinely free VM tier. **Note: on 2026-06-21 the Always Free Ampere A1
+allowance was halved from 4 OCPU / 24 GB to 2 OCPU / 12 GB**, which still clears
+the 8 GiB line above, so the full ranking runs there — but free-tier resources
+can be reclaimed, so keep a snapshot and a migration path if this carries the
+Full evaluation. Signup needs a card and is more involved.
 
 ### C. Hugging Face Spaces (Docker Space)
 
 Free and fast to stand up (2 vCPU / 16 GB), but the Space sleeps when idle, so
 keep-alive traffic is required. Suitable for smoke testing; less suitable as the
-30-day endpoint unless kept warm.
+30-day endpoint unless kept warm. Also weigh the data obligations: request bodies
+cross a third-party platform, and the rules forbid retaining or repurposing them.
 
 ### D. Tunnel from a local machine (zero cost)
 

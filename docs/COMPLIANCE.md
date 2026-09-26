@@ -85,11 +85,52 @@ See Attribution below.
 | 1 | Smoke passes; Add/Search usable | Achieved with P1; run before Full |
 | 2 | API contract per official Add/Search format | See `tests/test_contract.py` |
 | 3 | Add/Search model is `gpt-4o-mini` | Default `CODEMEM_LLM_MODEL=gpt-4o-mini`, fixed for the open-source entry. Enrichment uses it; Search uses it only for relevance scoring, never generation. |
-| 4 | API reachable publicly for >= 30 days | Requires ingress (see `deploy/README.md`); image is host-agnostic |
+| 4 | API reachable publicly for >= 30 days | **Hard blocker; not yet done.** Every track must self-host (see Deployment obligations below). The image is host-agnostic, so this is an infrastructure task, not a code task. |
 | 5 | Complete run instructions | `README.md` plus `deploy/README.md` |
 | 6 | Originality disclosed | This file |
 | 7 | Substantive submission | Original data model, chunking, IDF identifier channel, gating and evidence assembly |
 | 8 | No manipulation | Section 4 above |
+
+## Deployment obligations (2026-09-26 rule update)
+
+The organisers now require a self-hosted, publicly reachable Add/Search API for
+**every** track; a repository or a Docker image is disclosure material and does
+not substitute for a deployed endpoint, and the platform does not deploy entries
+on a participant's behalf. The old "submit code, the platform builds it" path is
+withdrawn, so items below are prerequisites for submission rather than
+nice-to-haves.
+
+- **Availability window.** The endpoint must stay reachable for at least 30 days
+  after submission, and `full` runs are scheduled one per three months, so the
+  window covers the queue as well as the evaluation. Tiers that sleep when idle
+  or expire on a trial clock do not satisfy this.
+- **Nothing may sit in front that can time out the request.** Add is synchronous
+  and our internal guard is 1 500 s against a 30-minute contract ceiling
+  (`Settings.add_deadline_seconds`), which means a worst-case Add can be a
+  25-minute connection that sends nothing back. Any L7 proxy whose
+  origin-response timeout is capped below that will return a gateway error and
+  the platform will record a failure. Concretely: Alibaba Cloud ESA caps the
+  full-chain back-to-origin timeout at 300 s (default 30 s, documented guidance
+  <= 60 s), so it cannot front this service regardless of configuration; its edge
+  functions are a JavaScript runtime, so it cannot host it either. Exposing the
+  container port directly on a VM avoids the whole class of problem.
+- **Authentication becomes mandatory**, not optional. The platform accesses the
+  interface with a Memory System Key we issue, which maps to `CODEMEM_API_KEY`.
+  Unauthenticated operation is permitted only for public smoke, and the public
+  surface here includes `DELETE /admin/users/{user_id}`, which erases a user's
+  memory permanently -- so a deployed instance without a key is a data-destruction
+  endpoint open to the internet.
+- **Capacity and timeout limits must be stated** in the submission: the contract
+  limits we enforce (`max_messages_per_add=5000`, `max_content_chars=4 000 000`,
+  `max_top_k=1000`, the 1 500 s Add guard), measured Add/Search latency, and the
+  fact that writes are serialized while reads proceed concurrently under WAL.
+- **Data obligations survive hosting.** Evaluation data and derived copies must be
+  deleted within 30 days of task completion and may not be used for training,
+  fine-tuning, product analysis, dataset reconstruction or redistribution; request
+  bodies are not logged. Where the request path crosses a third party that logs
+  or inspects bodies (a CDN, a WAF, or a third-party hosting platform), that
+  hosting choice has to be assessed against these obligations, not assumed
+  compliant.
 
 ### Note on the embedding model
 
