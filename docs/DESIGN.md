@@ -79,10 +79,60 @@ per type so a large blob cannot flood the index.
 
 ### L3 — `memory` (the only table Search reads)
 
-Every retrieved item is a row here. `kind` is `chunk` today, with `card` and
-`episode` reserved for enrichment. Keeping generation confined to Add is
+Every retrieved item is a row here. `kind` is `chunk` today, with `card` defined
+below and `episode` still reserved. Keeping generation confined to Add is
 enforced structurally: Search cannot return text that was not first written to
 this table.
+
+#### Card schema
+
+A card is one comparable object per topic span inside one session, so a session
+enters ranking as a single candidate rather than as ~100 siblings competing for
+the same slots. It is *addressable*, not *quotable*:
+
+```
+memory (kind = 'card')
+  id            card_<session_id>_<ordinal>
+  user_id       the card's session's owner; filtered exactly like a chunk
+  session_id    never spans sessions
+  span_first    row id of the first covered chunk   \ same basis as
+  span_last     row id of the last covered chunk    / Store.session_span
+  entities      L2 identifier set over the span, IDF-weighted
+  overview      LLM text, read only by the scorer
+  content       NULL
+  created_at    source timestamp of the earliest covered message
+  superseded_by as for any memory row
+```
+
+`span_first`/`span_last` bound the card against `session_span`, which is computed
+for the position tilt anyway; the card adds no new ordering primitive. Note this
+is a topic span across messages, unrelated to `chunker.segment()`, which splits
+one message body at structural boundaries.
+
+The invariants that make it safe, each one testable:
+
+1. **`content IS NULL`, and `data[].id` never resolves to a card.** A card is
+   expanded to the chunks it covers before assembly, so everything the platform
+   sees is still a verbatim span of Add input. `tests/test_traceability.py`
+   rejects generated text in `content`; a card returned whole would fail it.
+2. **Span integrity.** Card spans within a session are non-overlapping and each
+   bound names a real chunk row. This is what makes "expand then return" total:
+   a card can never point at text that does not exist.
+3. **`overview` reaches no prompt and no payload.** Its only reader is scoring,
+   which emits a number. This keeps the single documented exception — an LLM in
+   the Search path scoring existing memories, never generating returned text —
+   the only exception.
+4. **Determinism.** Card identity and spans are pure functions of Add input plus
+   configuration, and `overview` is cached by the content hash of its span
+   (the existing enrichment cache), so a re-Add or a cache hit reproduces the
+   same row and the same ranking. A non-deterministic scorer input would put the
+   platform's reproduction check at the mercy of query order.
+5. **A card qualifies nothing.** Eligibility still requires a lexical or entity
+   hit on an actual chunk, as with recency and dense. Without this, an
+   approximate channel becomes a way to walk a candidate past the noise gate.
+6. **`created_at` carries source time**, never the write clock — the card's
+   processing date is a fact about our pipeline that no auditor can find in the
+   input.
 
 ### Governance
 

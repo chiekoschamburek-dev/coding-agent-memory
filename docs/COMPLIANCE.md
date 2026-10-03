@@ -132,17 +132,20 @@ nice-to-haves.
   hosting choice has to be assessed against these obligations, not assumed
   compliant.
 
-### Note on the embedding model
+### Note on the encoder models
 
-The rules fix the **Add/Search model** at `gpt-4o-mini`. Our P1 baseline uses no
-model at all: chunking, identifier extraction, BM25 and fusion are deterministic
-and model-free. The dense channel (P2) is planned to use an open-source
-*embedding* model, not a generative one, and `text-embedding-3-small` is
-available as a drop-in switch via `CODEMEM_EMBED_BACKEND`. The position taken is
-that a non-generative open-source encoder is not a "model" in the sense the rule
-constrains, since it cannot generate an answer; this is stated explicitly here
-so the choice is disclosed rather than assumed. If the organisers read the rule
-more narrowly, the switch keeps the entry compliant.
+The rules fix the **Add/Search model** at `gpt-4o-mini`. Our deterministic
+baseline uses no model at all: chunking, identifier extraction, BM25 and fusion
+are model-free. The dense and rerank channels ship with non-generative
+open-source encoders (BAAI/bge-small-en-v1.5 and
+cross-encoder/ms-marco-MiniLM-L-6-v2), and the optional LLM channel defaults to
+`gpt-4o-mini` and never generates returned content. The position taken is that
+a non-generative encoder is not a "model" in the sense the rule constrains,
+since it cannot generate an answer; this is stated explicitly here so the
+choice is disclosed rather than assumed. If the organisers read the rule more
+narrowly, `CODEMEM_DENSE_ENABLED=false` and `CODEMEM_RERANK_ENABLED=false`
+disable both channels entirely, and `CODEMEM_EMBED_BACKEND=openai` switches the
+encoder to a hosted alternative — the entry stays compliant either way.
 
 ## Attribution
 
@@ -167,17 +170,22 @@ more narrowly, the switch keeps the entry compliant.
 | FastAPI | HTTP framework | MIT |
 | Pydantic | Request/response validation | MIT |
 | Uvicorn | ASGI server | BSD-3-Clause |
-| SQLite / FTS5 | Storage and lexical index | Public domain |
+| SQLite / FTS5 | Storage, lexical index, per-user vector store | Public domain |
 | PyYAML | Configuration parsing | MIT |
 | pytest, httpx | Tests | MIT / BSD-3-Clause |
 | `tiktoken` (optional) | Token accounting | MIT |
-| BGE-M3 (planned, P2) | Dense embeddings | MIT |
-| bge-reranker-v2-m3 (planned, P2) | Cross-encoder reranking | MIT |
-| FAISS (planned, P2) | Vector index | MIT |
+| `numpy` (optional, `dense` extra) | Vector arithmetic for dense retrieval | BSD-3-Clause |
+| `sentence-transformers` (optional, `dense` extra) | Embedding and cross-encoder runtime | Apache-2.0 |
+| `openai` (optional, `llm` extra) | Client for hosted encoder/LLM backends | Apache-2.0 |
+| BAAI/bge-small-en-v1.5 (default `CODEMEM_EMBED_MODEL`) | Dense embeddings | MIT |
+| cross-encoder/ms-marco-MiniLM-L-6-v2 (default `CODEMEM_RERANK_MODEL`) | Cross-encoder reranking | MIT |
 
-BGE-M3 and bge-reranker are published by the BAAI FlagEmbedding project. FAISS
-is published by Meta AI Research. If any of these are added, their model cards
-and licences are to be cited here before submission.
+The two default models are non-generative encoders distributed via Hugging Face
+(`BAAI/bge-small-en-v1.5`, `cross-encoder/ms-marco-MiniLM-L-6-v2`), and their
+model cards carry the MIT licence. Both channels are runtime-switchable
+(`CODEMEM_DENSE_ENABLED=false`, `CODEMEM_RERANK_ENABLED=false`), so the service
+also runs fully model-free. No FAISS or other vector-index library is used:
+vectors live in SQLite and are searched brute-force within one `user_id`.
 
 ### Methods referenced (not copied)
 
