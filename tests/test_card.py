@@ -279,3 +279,93 @@ def test_no_card_without_flag(monkeypatch, tmp_path):
     with TestClient(app) as client:
         add_session(client, user_id="u1", session_id="s1", request_id="req:1")
         assert card_row(client, "u1") is None
+
+
+def test_card_expansion_vouches_verbatim_chunks(monkeypatch, tmp_path):
+    """The relaxed invariant: a gated card whose session has no admitted chunk
+    vouches the session's own tail chunks into the payload — verbatim, capped,
+    never the card itself."""
+    app, _ = make_app(
+        monkeypatch,
+        tmp_path,
+        lambda user: "Session overview: debugging the quantum flux capacitor "
+        "calibration drift across temperature cycles.",
+        card_expansion=True,
+    )
+    with app as client:
+        add_session(client, user_id="u1", session_id="s1", request_id="req:1")
+        row = card_row(client, "u1")
+        assert row is not None
+
+        response = client.post(
+            "/search",
+            json={
+                "query": "quantum flux capacitor calibration drift",
+                "user_id": "u1",
+                "top_k": 10,
+            },
+        )
+        items = response.json()["data"]
+        assert items, "expansion must give the card-matched session a payload"
+
+        store = client.app.state.container.store
+        memory_ids = [int(item["id"].split("_")[1]) for item in items]
+        kinds = {}
+        with store._read() as conn:  # noqa: SLF001 - test harness
+            for mid in memory_ids:
+                kinds[mid] = conn.execute(
+                    "SELECT kind FROM memory WHERE id = ?", (mid,)
+                ).fetchone()["kind"]
+        # Everything returned is a verbatim chunk; the card never is.
+        assert set(kinds.values()) == {"chunk"}
+        assert str(row["id"]) not in {item["id"] for item in items}
+        assert str(row["id"]) not in {item["content"] for item in items}
+        # The tail comes first: row ids descend within the expansion.
+        assert memory_ids == sorted(memory_ids, reverse=True)
+        # Scores keep decaying from the card's head score.
+        scores = [item["score"] for item in items]
+        assert all(a > b for a, b in zip(scores, scores[1:]))
+
+
+def test_card_expansion_respects_the_chunk_cap(monkeypatch, tmp_path):
+    """Expansion emits at most ``card_expansion_chunks`` items for one session."""
+    app, _ = make_app(
+        monkeypatch,
+        tmp_path,
+        lambda user: "Session overview: debugging the quantum flux capacitor "
+        "calibration drift across temperature cycles.",
+        card_expansion=True,
+        card_expansion_chunks=1,
+    )
+    with app as client:
+        add_session(client, user_id="u1", session_id="s1", request_id="req:1")
+        response = client.post(
+            "/search",
+            json={
+                "query": "quantum flux capacitor calibration drift",
+                "user_id": "u1",
+                "top_k": 10,
+            },
+        )
+        assert len(response.json()["data"]) == 1
+
+
+def test_card_without_expansion_still_qualifies_nothing(monkeypatch, tmp_path):
+    """The shipped invariant stays the default: expansion is opt-in."""
+    app, _ = make_app(
+        monkeypatch,
+        tmp_path,
+        lambda user: "Session overview: debugging the quantum flux capacitor "
+        "calibration drift across temperature cycles.",
+    )
+    with app as client:
+        add_session(client, user_id="u1", session_id="s1", request_id="req:1")
+        response = client.post(
+            "/search",
+            json={
+                "query": "quantum flux capacitor calibration drift",
+                "user_id": "u1",
+                "top_k": 10,
+            },
+        )
+        assert response.json()["data"] == []

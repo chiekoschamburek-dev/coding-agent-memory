@@ -446,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="enable L3 experience cards (one overview per "
                              "session, scored but never emitted); spends one "
                              "LLM call per Add")
+    parser.add_argument("--card-expansion", action="store_true",
+                        help="relax card invariant 5: a gated card may vouch "
+                             "its session's verbatim tail chunks into the "
+                             "payload when no chunk was admitted on its own")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -497,6 +501,8 @@ def main(argv: list[str] | None = None) -> int:
     overrides: dict = {}
     if args.cards:
         overrides["card_enabled"] = True
+    if args.card_expansion:
+        overrides["card_expansion"] = True
     if args.dense_enabled is not None:
         overrides["dense_enabled"] = args.dense_enabled.lower() == "true"
     if args.rerank_enabled is not None:

@@ -721,6 +721,66 @@ def assemble(
             )
             taken += 1
 
+        # Card invariant 5, relaxed under measurement (eval/README.md,
+        # experience cards): the session's only admitted member is its card —
+        # no chunk of this session cleared the informative-channel gate — yet
+        # the card's overview matched the query well enough to clear it and to
+        # rank this session here. Expansion vouches the session's own chunks
+        # into the payload: verbatim spans, selected by the position prior
+        # (trajectories edit late), capped, deduplicated and token-budgeted
+        # exactly like any other slot fill. The card itself is still never
+        # returned, and scores keep decaying from its head score.
+        if (
+            not taken
+            and settings.card_expansion
+            and any(memories[c.memory_id].kind == "card" for c in group)
+        ):
+            head_final = max(c.final for c in group)
+            expand_rows = store.session_chunk_memories(
+                user_id,
+                memories[group[0].memory_id].session_id,
+                settings.card_expansion_chunks,
+            )
+            for memory in expand_rows:
+                if taken >= session_cap or len(items) >= top_k:
+                    break
+                full_form = len(items) < settings.evidence_full_count
+                budget_for_item = (
+                    settings.evidence_item_tokens
+                    if full_form
+                    else settings.evidence_ptr_tokens
+                )
+                operative_weight = (
+                    settings.evidence_operative_weight if session_index < 1 else 0.0
+                )
+                content, truncated = _select_span(
+                    memory.text,
+                    budget_for_item,
+                    plan.keywords,
+                    operative_weight,
+                )
+                if not content or content in seen:
+                    continue
+                seen.add(content)
+                item_tokens = count_tokens(content)
+                if items and used + item_tokens > budget:
+                    break
+                used += item_tokens
+                score = min(head_final, ceiling)
+                ceiling = score
+                items.append(
+                    EvidenceItem(
+                        memory_id=memory.id,
+                        content=content,
+                        score=round(score, 6),
+                        created_at=_iso_from_ms(memory.ts) or memory.created_at,
+                        tokens=item_tokens,
+                        truncated=truncated,
+                        superseded=memory.superseded_by is not None,
+                    )
+                )
+                taken += 1
+
         if taken:
             sessions_used += 1
 

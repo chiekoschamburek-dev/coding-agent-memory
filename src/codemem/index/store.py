@@ -415,6 +415,44 @@ class Store:
             )
         return memory_id
 
+    def session_chunk_memories(
+        self, user_id: str, session_id: str, limit: int
+    ) -> list[MemoryRow]:
+        """The session's chunk memories, latest position first.
+
+        Row ids run in message order within a session, so ``id DESC`` is the
+        trajectory's tail — where the measured prior says the edits live
+        (trajectories read before they change). Used by card expansion to
+        vouch verbatim chunks into the payload; reads only this user's rows.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id, user_id, session_id, request_id, chunk_id, kind, title,"
+                " text, ts, ord, created_at, superseded_by FROM memory"
+                " WHERE user_id = ? AND session_id = ? AND kind = 'chunk'"
+                " ORDER BY id DESC LIMIT ?",
+                (user_id, session_id, max(1, limit)),
+            ).fetchall()
+        return [
+            MemoryRow(
+                id=int(r["id"]),
+                user_id=r["user_id"],
+                session_id=r["session_id"],
+                request_id=r["request_id"],
+                chunk_id=int(r["chunk_id"]) if r["chunk_id"] is not None else None,
+                kind=r["kind"],
+                title=r["title"],
+                text=r["text"],
+                ts=int(r["ts"]) if r["ts"] is not None else None,
+                ord=int(r["ord"]),
+                created_at=r["created_at"],
+                superseded_by=(
+                    int(r["superseded_by"]) if r["superseded_by"] is not None else None
+                ),
+            )
+            for r in rows
+        ]
+
     def _refresh_repo_profile(self, conn: sqlite3.Connection, user_id: str, now: str) -> None:
         """Rebuild the entity document-frequency table for a user_id.
 

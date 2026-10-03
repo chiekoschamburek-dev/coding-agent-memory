@@ -376,6 +376,10 @@ def main(argv: list[str] | None = None) -> int:
                              "overview per session, scored but never emitted. "
                              "Requires CODEMEM_LLM_BASE_URL / _API_KEY / "
                              "_MODEL and spends one LLM call per Add")
+    parser.add_argument("--card-expansion", action="store_true",
+                        help="relax card invariant 5: a gated card may vouch "
+                             "its session's verbatim tail chunks into the "
+                             "payload when no chunk was admitted on its own")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -461,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_position_weight"] = args.position_weight
     if args.cards:
         overrides["card_enabled"] = True
+    if args.card_expansion:
+        overrides["card_expansion"] = True
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

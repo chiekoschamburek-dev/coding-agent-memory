@@ -267,6 +267,15 @@ class Settings:
     card_max_input_chars: int = 8000
     # Output budget for the overview itself.
     card_max_output_tokens: int = 400
+    # Card invariant 5, relaxed under measurement (eval/README.md): allow a
+    # card that cleared the gate to carry its session's own chunks into the
+    # payload when no chunk of that session was admitted on its own. The
+    # expanded items are verbatim chunk spans selected by the position prior
+    # (trajectories edit late), capped and budgeted like any other slot fill.
+    # Off by default: the shipped behaviour is "a card qualifies nothing".
+    card_expansion: bool = False
+    # How many span chunks an expansion may emit for one session.
+    card_expansion_chunks: int = 2
 
     # ---- dense retrieval ------------------------------------------------
     # On by default. The cost/benefit was measured on both devices and it flips
@@ -518,6 +527,7 @@ class Settings:
         )
         put("llm_enabled", _env_bool("CODEMEM_LLM_ENABLED", False))
         put("card_enabled", _env_bool("CODEMEM_CARDS", False))
+        put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))
         put("llm_model", _env_str("CODEMEM_LLM_MODEL", "gpt-4o-mini"))
