@@ -1108,6 +1108,60 @@ the Answer-evaluation section): on file-localisation multiple choice neither
 payload shape separates from the no-memory prior — the discrimination now
 waits on harder question types or a budget-binding corpus scale.
 
+### Experience cards: implemented, measured, inert as shipped (2026-10-03)
+
+The L3 card is the one structural remedy the funnel work left standing: a
+session enters ranking as a single comparable object (the cross-encoder reads
+(query, overview) as one pair, which no single chunk of a ~100-chunk session
+can stand in for — the session head names the task file only 12.9 % of the
+time) and recall gains a candidate that is not one of ~100 same-session
+siblings. Implemented per the card schema (docs/DESIGN.md): one generated
+overview per session during Add, cached by prompt content hash, embedded for
+dense, `kind='card'` in the memory table; it flows through recall, scoring and
+reranking like any row, but is never emitted — `data[].content` stays a
+verbatim chunk span — and a session whose only member is its card emits
+nothing (`CODEMEM_CARDS`, off by default; 7 invariant tests in
+`tests/test_card.py`).
+
+Measured on all three harnesses, against the shipped configuration:
+
+| harness | shipped | cards on | paired |
+|---|---|---|---|
+| proxy, session recall@10 (89 q) | 0.4746 | 0.4784 | +0.004, p=0.77, **2/89 queries moved** |
+| proxy, session MRR | 0.7584 | 0.7584 | identical to four decimals |
+| evidence, decidable (30 q) | 0.567 | 0.567 | +1/−1, p=1.0 |
+| evidence, ambiguous | 0.300 | **0.233** | +2/−0 improved |
+| evidence, payload | 9.6 entries / 2 408 tok | 5.9 / 1 883 | **−22 % tokens** |
+| procedure e2e, accuracy (32 q × 8) | 0.469 | 0.438 | −1 question, p=1.0 |
+| procedure e2e, **answer session shown** | 43.8 % | **43.8 %** | unchanged |
+
+The costs are not free: Add went from 180 s to 1 652 s for the benchmark
+corpus (300 LLM calls, serialized at ~5.4 s each) and search latency from
+724 ms to 1 736 ms. The overview quality itself is good — the generated
+summaries name concrete files, the bug, the approach and the outcome — so the
+null is not a generation-quality failure.
+
+**Why it is inert: the recall promise is structurally disabled by the safety
+invariant.** The card can only *re-rank* sessions that already have an
+admitted chunk, because "a card qualifies nothing" (card invariant 5): a
+session whose chunks never cleared the informative-channel gate has no
+emittable members even when its card matches the query perfectly. The 56 % of
+procedure questions where the answer session is missing are exactly those —
+so the card, as shipped, cannot touch the number it was designed to move, and
+answer_session_shown did not move by a single question. What survived is a
+mild denoising side effect: cards displace weak chunks in the pool, so the
+payload shrinks 22 % and ambiguity drops, at nine times the Add cost.
+
+**The fork this measurement forces.** Either (a) relax invariant 5 — let a
+card hit carry its session's *span chunks* into the payload (expansion pulls
+verbatim chunks by span, so returned text stays compliant; the noise gate
+then has to be re-derived for card-admitted sessions, whose admission rests
+on generated text), and re-measure the procedure e2e, where the headroom is
+measured at +0.156 over pure RAG; or (b) retire the card lever and accept the
+43.8 % answer-session ceiling on procedure questions. As shipped, (b) is what
+the numbers say: everything the card adds, it adds to sessions that were
+already findable.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

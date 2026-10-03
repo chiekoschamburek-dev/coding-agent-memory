@@ -442,6 +442,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="weight for operative lines when selecting a window")
     parser.add_argument("--repeats", type=int, default=1,
                         help="answer each question N times and majority-vote")
+    parser.add_argument("--cards", action="store_true",
+                        help="enable L3 experience cards (one overview per "
+                             "session, scored but never emitted); spends one "
+                             "LLM call per Add")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -491,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
     from codemem.core.config import Settings
 
     overrides: dict = {}
+    if args.cards:
+        overrides["card_enabled"] = True
     if args.dense_enabled is not None:
         overrides["dense_enabled"] = args.dense_enabled.lower() == "true"
     if args.rerank_enabled is not None:
