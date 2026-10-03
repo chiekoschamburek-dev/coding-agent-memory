@@ -1215,6 +1215,48 @@ shipped: one question does not clear the project's two-sided p<0.05 bar),
 and raising n on the procedure set is the cheapest way to make any of these
 one-question effects decidable.
 
+### Large-set re-measurement: the question type now separates arms (58 questions)
+
+`build_qa_procedure.py --per-query 6` raises the yield from 32 to 58 — the
+corpus's structural ceiling, not a filter artefact: of the candidate
+assistant messages, 14 713 are tool-call records and 6 030 are outside the
+claim window, so prose-with-a-recorded-cause anchored to a scored issue is
+what runs out. The adversarial anti-guessability construction is kept intact
+(issue-word baseline 0.000, zero gold 6-grams in the question, gold positions
+balanced). Four arms, n=58 × 5 repeats, majority vote:
+
+| arm | majority acc | vs no-memory | vs shipped |
+|---|---|---|---|
+| no memory (prior) | 0.328 | — | — |
+| shipped codemem | 0.362 | +5/−3, p=0.73 | — |
+| **shipped + dense_eligible@0.45** | **0.397** | +7/−3, p=0.34 | +2/−0, p=0.50 |
+| pure RAG (dense top-100) | **0.224** | +3/−9, p=0.15 | — |
+
+Two results at n=58 that the 32-question set could only hint at:
+
+1. **The first statistically significant separation of the programme: the
+   gated pipeline beats pure RAG at p=0.0063** (+1/−11, +0.172, CI [−0.293,
+   −0.069]). RAG reaches the answer session 89.7 % of the time against our
+   34.5 % — and answers **below chance** (0.224 against 0.25). Same dense
+   channel, same questions, same answer model: the difference is the gate
+   and the assembly. "Return everything" is now not merely worse, it is
+   *actively harmful* on the question type whose answers exist only in
+   memory, and the effect size (−17 pp) is the noise mechanism measured at
+   scale.
+2. **`dense_eligible@0.45` holds its sign on the larger instrument** (+2/−0
+   over shipped, +0.069 over prior) — the only lever with a consistent
+   direction on both set sizes and a verified mechanism case behind it.
+   Still short of significance at n=58; it becomes the default candidate
+   if the effect survives the next instrument revision.
+
+What did not move: `answer_session_shown` sits at 34.5 % on this set for
+both shipped and gate arms — the newer questions anchor on sessions our
+channels reach even less often, so the recall ceiling is the same wall, seen
+from further away. The memory-over-prior gain is positive-directional but
+small (+0.034 shipped, +0.069 gated); on this question type, controlling
+noise is worth more than adding reach — which is the whole thesis of the
+small payload, now measured against a significant reference point.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
