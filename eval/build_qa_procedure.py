@@ -125,7 +125,7 @@ def claims_of(memory: dict, issue_shingles: set[str], min_overlap: float) -> lis
         if not isinstance(content, str):
             continue
         text = content.strip()
-        if not (80 <= len(text) <= 520):
+        if not (80 <= len(text) <= 700):
             continue
         if _NOT_PROSE.search(text[:80]) or _STATUS.search(text) or not _CAUSE.search(text):
             continue
@@ -179,7 +179,7 @@ def guessability(questions: list[dict]) -> float:
 
 def build(benchmark: Path, *, n_distractors: int = 3, seed: int = 20260926,
           min_overlap: float = 0.15, max_questions: int | None = None,
-          verbose: bool = True) -> dict:
+          per_query: int = 1, verbose: bool = True) -> dict:
     bench = json.loads(benchmark.read_text(encoding="utf-8"))
     memories = {m["session_id"]: m for m in bench["memories"]}
     repo_sessions: dict[str, list[str]] = defaultdict(list)
@@ -219,80 +219,95 @@ def build(benchmark: Path, *, n_distractors: int = 3, seed: int = 20260926,
         # Anchor on the session that recorded the most, so the gold is a claim the
         # session genuinely centres on rather than a stray sentence. Take its
         # LEAST issue-similar claim: the answer must not be the option a reader
-        # would choose from the issue wording alone.
-        session_id, found = max(anchored, key=lambda pair: (len(pair[1]), pair[0]))
-        ranked = sorted(enumerate(found), key=lambda p: (overlap(p[1]), -p[0]))
-        # One claim answers at most one question. Several queries anchor on the same
-        # busy session, and a repeated gold would turn n items into n looks at one
-        # retrieval.
-        fresh = [c for c in (found[i] for i, _ in ranked)
-                 if normalise(c)[:80] not in used_golds]
-        if not fresh:
-            skipped["gold_already_used"] += 1
-            continue
-        gold = fresh[0]
-        gold_overlap = overlap(gold)
-
-        gold_sh = shingles(gold)
-        pool: list[tuple[int, str, str]] = []
-        for other_id in repo_sessions[query["repo"]]:
-            if other_id == session_id:
-                continue
-            other = memories.get(other_id)
-            if other is None:
-                continue
-            for claim in claims_of(other, issue_sh, min_overlap):
-                # A distractor that overlaps the gold would make two right answers.
-                if shingles(claim) & gold_sh:
+        # would choose from the issue wording alone. With ``per_query > 1`` the
+        # remaining anchors and claims continue in the same discipline — every
+        # question still gets its own adversarial distractor set and its own
+        # unused gold — so the extra items are independent retrievals, not
+        # paraphrases of the first.
+        ranked_sessions = sorted(anchored, key=lambda pair: (-len(pair[1]), pair[0]))
+        emitted = 0
+        for anchor_id, found in ranked_sessions:
+            if per_query and emitted >= per_query:
+                break
+            ranked = sorted(enumerate(found), key=lambda p: (overlap(p[1]), -p[0]))
+            for claim_index, _ in ranked:
+                if per_query and emitted >= per_query:
+                    break
+                gold = found[claim_index]
+                if normalise(gold)[:80] in used_golds:
                     continue
-                pool.append((overlap(claim), other_id, claim))
-        if len(pool) < n_distractors:
-            skipped["too_few_distractors"] += 1
-            continue
+                gold_overlap = overlap(gold)
+                gold_sh = shingles(gold)
+                pool: list[tuple[int, str, str]] = []
+                for other_id in repo_sessions[query["repo"]]:
+                    if other_id == anchor_id:
+                        continue
+                    other = memories.get(other_id)
+                    if other is None:
+                        continue
+                    for claim in claims_of(other, issue_sh, min_overlap):
+                        # A distractor that overlaps the gold would make two right answers.
+                        if shingles(claim) & gold_sh:
+                            continue
+                        pool.append((overlap(claim), other_id, claim))
+                if len(pool) < n_distractors:
+                    skipped["too_few_distractors"] += 1
+                    continue
 
-        # Adversarial construction: at least one distractor has to track the issue
-        # more closely than the gold does, so the lexical shortcut -- pick the
-        # option whose wording best matches the problem statement -- points away
-        # from the right answer. The rest are drawn at random, so the item does not
-        # degenerate into "spot the three that sound alike".
-        decoys = [p for p in pool if p[0] > gold_overlap]
-        if not decoys:
-            skipped["gold_is_most_topical"] += 1
-            continue
-        lead = max(decoys, key=lambda p: (p[0], p[1]))
-        chosen = [lead] + rng.sample([p for p in pool if p is not lead], n_distractors - 1)
-        options = [gold] + [claim for _, _, claim in chosen]
-        rng.shuffle(options)
-        overlaps.append(len(gold_sh & issue_sh) / len(gold_sh))
+                # Adversarial construction: at least one distractor has to track the issue
+                # more closely than the gold does, so the lexical shortcut -- pick the
+                # option whose wording best matches the problem statement -- points away
+                # from the right answer. The rest are drawn at random, so the item does not
+                # degenerate into "spot the three that sound alike".
+                decoys = [p for p in pool if p[0] > gold_overlap]
+                if not decoys:
+                    skipped["gold_is_most_topical"] += 1
+                    continue
+                lead = max(decoys, key=lambda p: (p[0], p[1]))
+                chosen = [lead] + rng.sample([p for p in pool if p is not lead], n_distractors - 1)
+                options = [gold] + [claim for _, _, claim in chosen]
+                rng.shuffle(options)
+                overlaps.append(len(gold_sh & issue_sh) / len(gold_sh))
 
-        questions.append(
-            {
-                "query_id": f"proc::{query['instance_id']}",
-                "instance_id": query["instance_id"],
-                "repo": query["repo"],
-                "question_type": "session-claim recall",
-                "question": (
-                    "An earlier engineering session in this repository worked on a "
-                    "problem related to the issue below. That session is not visible "
-                    "to you except through any memory you are given.\n\n"
-                    "Issue:\n" + issue.strip()[:2500] + "\n\n"
-                    "Which statement about that problem did that earlier session "
-                    "record while working on it?"
-                ),
-                "options": options,
-                "gold_index": options.index(gold),
-                "gold_claim": gold,
-                "answer_session": session_id,
-                "distractor_sessions": [sid for _, sid, _ in chosen],
-                "claim_chars": len(gold),
-                "issue_overlap": round(overlaps[-1], 4),
-                "gold_issue_terms": gold_overlap,
-                "best_distractor_issue_terms": max(p[0] for p in chosen),
-            }
-        )
-        used_golds.add(normalise(gold)[:80])
-        if max_questions and len(questions) >= max_questions:
-            break
+                # One claim answers at most one question globally; several queries can
+                # anchor on the same busy session, and a repeated gold would turn n items
+                # into n looks at one retrieval. Extra questions per query keep the
+                # plain id for the first and suffix the rest, so older files line up.
+                questions.append(
+                    {
+                        "query_id": (
+                            f"proc::{query['instance_id']}"
+                            if emitted == 0
+                            else f"proc::{query['instance_id']}::{emitted + 1}"
+                        ),
+                        "instance_id": query["instance_id"],
+                        "repo": query["repo"],
+                        "question_type": "session-claim recall",
+                        "question": (
+                            "An earlier engineering session in this repository worked on a "
+                            "problem related to the issue below. That session is not visible "
+                            "to you except through any memory you are given.\n\n"
+                            "Issue:\n" + issue.strip()[:2500] + "\n\n"
+                            "Which statement about that problem did that earlier session "
+                            "record while working on it?"
+                        ),
+                        "options": options,
+                        "gold_index": options.index(gold),
+                        "gold_claim": gold,
+                        "answer_session": anchor_id,
+                        "distractor_sessions": [sid for _, sid, _ in chosen],
+                        "claim_chars": len(gold),
+                        "issue_overlap": round(overlaps[-1], 4),
+                        "gold_issue_terms": gold_overlap,
+                        "best_distractor_issue_terms": max(p[0] for p in chosen),
+                    }
+                )
+                used_golds.add(normalise(gold)[:80])
+                emitted += 1
+                if max_questions and len(questions) >= max_questions:
+                    break
+            if max_questions and len(questions) >= max_questions:
+                break
 
     if verbose:
         print(f"questions: {len(questions)}")
@@ -363,6 +378,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-overlap", type=float, default=0.15,
                         help="max fraction of the claim's 6-grams allowed in the issue")
     parser.add_argument("--max-questions", type=int, default=None)
+    parser.add_argument("--per-query", type=int, default=1,
+                        help="up to N questions per query, each with its own "
+                             "anchored session, unused gold claim and "
+                             "adversarial distractor set (raises the ceiling "
+                             "from one per query to per_query x queries)")
     args = parser.parse_args(argv)
 
     if not args.data.exists():
@@ -370,7 +390,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     data = build(args.data, n_distractors=args.n_distractors, seed=args.seed,
-                 min_overlap=args.min_overlap, max_questions=args.max_questions)
+                 min_overlap=args.min_overlap, max_questions=args.max_questions,
+                 per_query=args.per_query)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=1)
