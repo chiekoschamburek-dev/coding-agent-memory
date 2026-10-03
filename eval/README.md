@@ -1162,6 +1162,59 @@ measured at +0.156 over pure RAG; or (b) retire the card lever and accept the
 the numbers say: everything the card adds, it adds to sessions that were
 already findable.
 
+**Fork (a), implemented and measured: still inert, and the diagnosis moves
+upstream (2026-10-03).** `card_expansion` (opt-in, `CODEMEM_CARD_EXPANSION`)
+vouches a gated card's session-tail chunks into the payload — verbatim spans,
+position-prior selection, capped, budgeted; 3 more invariant tests. Armed
+with all 300 cards written and embedded (verified in the run's database), on
+both harnesses it moved **nothing**: proxy — cards-only rows already showed
+2/89 queries moving, expansion adds none; evidence — decidable 0.567 = 0.567;
+procedure e2e 0.469 → 0.438 (−1 question, p=1.0), answer_session_shown
+43.8 % → 43.8 %, not one question changed. The mechanism is now closed: a
+card that only dense found is a *dense-only* candidate, and the evidence gate
+(`INFORMATIVE_CHANNELS`) discards it before ranking — so expansion's trigger
+("a session whose only admitted member is its card") never fires for exactly
+the sessions it was built for. The relaxation was necessary but not
+sufficient; the binding constraint sits one stage earlier, at the gate.
+
+**The gate lever, measured as a dose-response (dense-only admission).**
+`dense_eligible` admits a dense-only candidate above an absolute cosine floor
+(0.45 default, strength = cosine above floor) — a switch that already existed
+and had never been measured end-to-end. Procedure e2e, n=32 × 8:
+
+| floor | majority acc | vs baseline | answer session shown |
+|---|---|---|---|
+| off (baseline) | 0.469 | — | 43.8 % |
+| **0.45** | **0.500** | +1/−0 | 43.8 % |
+| 0.30 | 0.469 | +1/−1 | 40.6 % |
+
+The +1 at 0.45 is a verified mechanism case, not drift: `django-27995` was
+8/8 wrong under the baseline, and with dense-only candidates in the pool the
+payload composition changed and 7/8 votes moved to the gold answer (flag
+confirmed live — votes differ, payload sizes do not). At 0.30 the same
+question stays fixed but `sympy-13039` breaks the other way: weak dense
+candidates crowd the answer session out of its payload (shown True → False)
+— the noise effect returning through the opened gate. Costs elsewhere are
+within noise: proxy at 0.45 moves 1/89 queries (session MRR −0.011),
+precision@10 −0.015 (p=0.09); evidence at 0.45 halves ambiguity (0.300 →
+0.167) while losing the same amount of decisive markers — decidable flat.
+One harness determinism check for free: an accidental unflagged rerun of the
+proxy reproduced every metric to the digit.
+
+Where this leaves the card programme: the complete cell — cards + expansion
++ gate 0.45 — has now been run: **0.469**, exactly baseline (paired +1/−1 vs
+baseline, −1/0 vs the gate alone). The card adds nothing on top of the gate;
+the gate alone remains the best measured arm. Full procedure-e2e leaderboard
+(n=32 × 8, majority vote): RAG 0.312 < cards 0.438 = cards+expansion 0.438 <
+baseline 0.469 (reproduced exactly on an inadvertent rerun) = cards+expansion
++gate 0.469 < **gate 0.45 alone 0.500**. The honest summary of this arc:
+**the 43.8 % answer-session ceiling on procedure questions survived every
+card variant tried, in every combination**; the only lever that moved the
+axis at all is plain `dense_eligible@0.45` (+1/32, p=1.0 — recorded, not
+shipped: one question does not clear the project's two-sided p<0.05 bar),
+and raising n on the procedure set is the cheapest way to make any of these
+one-question effects decidable.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
