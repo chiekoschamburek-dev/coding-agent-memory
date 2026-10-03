@@ -308,11 +308,13 @@ one real effect, and it is a packing policy, not information the answer model
 reads.
 
 Sessions are *our* unit, and the exchange rate is ours to set: Add turns one
-session into ~95.6 memory entries, and `assemble` then caps a session at 3 of
-them, so the observed packing is **2.06 memory entries per session**. That means
-`top_k=100` buys roughly **48 sessions, not 100** — and with no per-session cap
-it would buy one or two, since a single session alone holds enough entries to
-fill the whole payload.
+session into ~95.6 memory entries, and `assemble` then capped a session at 3 of
+them (the default when this was measured), so the observed packing was **2.06
+memory entries per session**. That meant `top_k=100` bought roughly **48
+sessions, not 100** — and with no per-session cap it would have bought one or
+two, since a single session alone holds enough entries to fill the whole
+payload. (The defaults have since moved to cap 5 with at most 2 sessions per
+payload; see the multi-span section below.)
 
 The two units do not score the same, and `run_benchmark` now reports both from a
 single run — the unprefixed rows collapse `data[]` onto sessions, the `item_`
@@ -406,7 +408,8 @@ answer session is present in the payload 100 % of the time, but `decidable` is
 into the window, the payload below it, or nowhere — under the real slot
 constraint, since a session spends up to `cap` of the k slots and the window
 therefore cannot hold `min(avail, k)` distinct sessions. On the default
-configuration, with entry `recall@10 = 0.5823` (n=89, 333 relevant sessions):
+configuration at the time (cap 3, sessions uncapped), with entry
+`recall@10 = 0.5823` (n=89, 333 relevant sessions):
 
 | bucket | macro | micro |
 |---|---|---|
@@ -425,10 +428,13 @@ statement that those queries matter more.
 
 Two facts fix the shape of this. **Candidate generation is not the bottleneck**:
 90.7 % of relevant sessions are already in the payload. And **the payload is
-thinner than `top_k` suggests** — 59.2 entries over 28.6 sessions, because the
-0.15 noise gate ends assembly long before the 100-item budget is reached
-(`evidence.py` breaks on `group[0].final < min_evidence_score`, not on
-`len(items) >= top_k`).
+thinner than `top_k` suggests** — 59.2 entries over 28.6 sessions under those
+defaults, because the 0.15 noise gate ended assembly long before the 100-item
+budget was reached (`evidence.py` breaks on
+`group[0].final < min_evidence_score`, not on `len(items) >= top_k`). Under the
+current defaults the shape is different: at most 2 sessions × cap 5 items, so
+the session caps — not the gate — bound the payload (mean 2 434 tokens on the
+30-question evidence set; see the multi-span section below).
 
 **The cap is a mechanical lever, not a ranking effect.** The session set is
 gate-decided, so lowering `max_evidence_per_session` costs no retrieval — it only
@@ -436,7 +442,7 @@ changes how many sessions the first k slots can span:
 
 | cap | item recall@10 | sessions spanned by 10 slots | equals |
 |---|---|---|---|
-| 3 (default) | 0.5823 | 4.00 | session recall@4 = 0.5818 |
+| 3 (the default when measured) | 0.5823 | 4.00 | session recall@4 = 0.5818 |
 | 2 | 0.6321 | 5.19 | session recall@5 = 0.6313 |
 | 1 | 0.7344 | 9.42 | session recall@9 = 0.7253 |
 
@@ -563,7 +569,7 @@ what the answer model can read and no distractor contradicts it):
 |---|---|---|---|---|---|---|---|---|
 | 1 | 34.0 | 3981 | 0.400 | 0.400 | 0.367 | 0.333 | 0.333 | 0.500 |
 | 2 | 54.1 | 5557 | 0.433 | 0.433 | 0.400 | 0.300 | 0.300 | 0.633 |
-| **3 (default)** | 67.2 | 6548 | 0.433 | 0.433 | **0.433** | **0.367** | **0.333** | **0.700** |
+| **3 (default when measured)** | 67.2 | 6548 | 0.433 | 0.433 | **0.433** | **0.367** | **0.333** | **0.700** |
 | 4 | 75.1 | 6996 | 0.433 | 0.400 | 0.400 | 0.367 | 0.400 | 0.733 |
 
 cap 1 is a clear loss — one span per session drops decisive evidence from 0.700
@@ -574,7 +580,10 @@ cap tightens (0.733 → 0.700 → 0.633 → 0.500).
 
 So cap 2 buys +0.0498 on a *proxy of window coverage* and pays for it on the
 proxy of *usefulness*, and the payment is on the axis the platform actually
-scores. It is not adopted; the default stays at 3.
+scores. It is not adopted; the default stays at 3. **This stand-off is what the
+2026-09-25 multi-span change resolved by moving the cap *up* to 5 while capping
+distinct sessions at 2 — see that section below; the rows above are the
+pre-change record.**
 
 (Compare within this table only: the `decidable` 0.233 baseline quoted further
 up was measured on an earlier revision, and the same command now returns 0.333
@@ -657,6 +666,90 @@ The memory *was* reaching the model: every question received a non-empty context
 (mean 67 candidates at top_k=100), and 80 of 90 included a session that shares a
 file with the task's patch. So this is not a plumbing failure — it is a null
 result for this question type.
+
+**Payload-shape comparison, 8 repeats per question (2026-10-02).** The pure-RAG
+baseline (see the baseline section above) settles the question the evidence
+metric left open: does the 44 k-token "return everything" payload out-answer
+the 2.4 k-token denoised one once a real answer model reads both? All three
+arms at n=90, 8 answers each, majority-voted (`scripts/compare_e2e.py`):
+
+| condition | majority acc | per-pass range | unanimous | entries shown | relevant sessions in context |
+|---|---|---|---|---|---|
+| no memory (prior) | 0.700 | 0.700–0.722 | 97.8 % | 0 | — |
+| **codemem (shipped assembler)** | **0.711** | 0.711–0.711 | 100 % | 5.8 | 1.01 |
+| pure RAG (dense top-100, whole chunks) | 0.689 | 0.689–0.700 | 98.9 % | 99.2 | 2.70 |
+
+Paired exact McNemar: codemem vs RAG +4/−2 (p=0.69, 95 % CI on the delta
+[−0.078, +0.033]); codemem vs prior +2/−1 (p=1.0); RAG vs prior +3/−4 (p=1.0).
+The answer model's noise floor is small on this question type (near-unanimous
+across 8 identical calls), so this null is measured, not sampled.
+
+**The reading that matters: RAG delivered 2.7× more relevant sessions into the
+context and 17× more tokens, and answered no better than a model given
+nothing.** The evidence metric's ambiguity collapse (RAG decidable 0.333) did
+**not** materialise as accuracy loss — gpt-4o-mini simply ignores the 44 k
+distractors on a question type where the answer is a file name it can match
+against the options. Symmetrically, codemem's denoising bought nothing
+measurable either: with the answer session present in only ~1 relevant session
+per question, accuracy already sits at the prior's ceiling for this type.
+Both payload shapes are, on file-localisation multiple choice, dead weight
+around the model's own prior — which is consistent with the earlier case
+study above and is now replicated at 8× the sampling.
+
+**Where the two payload shapes can still separate:** a question type the prior
+cannot answer from its own knowledge — the procedure/claim questions
+(`eval/build_qa_procedure.py`) whose answers exist only inside a recorded
+session — and a corpus scale where the platform's 117 760-token input budget
+starts binding the 44 k payload. The procedure comparison has since been run;
+see the next subsection of the Answer-evaluation section.
+
+**Procedure questions, where the answer exists only in memory (2026-10-03).**
+`qa_procedure.json` asks: given the issue, which of four verbatim transcript
+excerpts came from the session that handled it? The gold excerpt names no file
+the issue names, so pretraining prior should not carry it — the answer exists
+only in the stored sessions. Same three arms, n=32, 8 answers each:
+
+| condition | majority acc | per-pass range | entries shown | answer session in context |
+|---|---|---|---|---|
+| no memory (prior) | 0.406 | 0.406–0.438 | 0 | — |
+| **codemem (shipped assembler)** | **0.469** | 0.438–0.469 | 5.9 | 43.8 % |
+| pure RAG (dense top-100, whole chunks) | 0.312 | 0.281–0.344 | 99.2 | **84.4 %** |
+
+Paired exact McNemar: **codemem vs RAG +6/−1, p=0.125 two-sided (0.0625
+one-sided), delta +0.156 with 95 % CI [0.000, +0.312]**; codemem vs prior
++4/−2 (p=0.69); RAG vs prior **+0/−3 (p=0.25, delta −0.094, CI upper bound
+exactly 0.000)** — the only arm of the whole investigation to land below the
+no-memory prior.
+
+Three readings, each measured rather than inferred:
+
+1. **The noise penalty is real where it can bind.** RAG retrieved the answer
+   session **84.4 %** of the time against codemem's 43.8 % — nearly twice the
+   recall — and answered **worse than a model given nothing**. Buried in 99
+   same-repository transcripts, the right excerpt competes with dozens of
+   maximally confusable ones; retrieval volume was not value. This is the
+   evidence metric's ambiguity mechanism showing up in actual answers, which
+   it refused to do on file localisation.
+2. **The prior floor is higher than the design intended.** no-memory scores
+   0.406, not 0.25: the excerpt options themselves leak signal (the model
+   matches the issue text against the excerpts' content), so this question
+   type measures "identify the session" with a 0.406 head start. The
+   separators between arms are therefore compressed; the true memory
+   contribution on a leak-free variant would be larger.
+3. **codemem's own ceiling on this type is retrieval-bound.** The answer
+   session reached the context only 43.8 % of the time — the issue-phrase
+   queries do not surface the claiming session through lexical/entity
+   channels, exactly the failure the L3 card design targets. RAG's dense
+   channel finds it easily; what it cannot do is make the payload survivable.
+   The two arms fail on different axes, which is why the combination —
+   dense-recall reach with gated, denoised assembly — is where the remaining
+   headroom sits.
+
+n=32 and a +6/−1 split sit below the project's two-sided p<0.05 bar, so this
+is recorded as a directional result with a mechanism that explains it — not as
+an established effect. It is nonetheless the first measurement in this file
+where the two payload shapes separated, and it separated on the axis the
+evidence metric predicted.
 
 **How the answer model locates the file without memory.** Measured, not assumed,
 because the initial explanation ("it knows the repository") turned out to be only
@@ -800,6 +893,97 @@ them whole and there is no wrong-window problem to fix, while a 200-token
 selection *shortens* the long ones. It also costs latency (`_select_span` runs
 per candidate; search mean 2.20 s against 1.49 s). Left off by default.
 
+**The window is a property of the checkpoint: the equal-pool experiment
+(C arms, 2026-09-26/27).** The section above measured *where* the cross-encoder
+reads inside a memory; this one measures *how much* it reads, and it is where
+`rerank_max_length` / `rerank_doc_tokens` stopped being a single global default.
+
+Setup. Three arms on the same benchmark and evidence harness, pool 120
+throughout. **M** is the shipped configuration: `cross-encoder/ms-marco-MiniLM-L-6-v2`
+with the MiniLM-era window (pair cap 512, document budget 200). **C2** and
+**C1** are `BAAI/bge-reranker-v2-m3` (a checkpoint with 8 194 learned
+positions) at two windows — C2 at the same 512/200, C1 at 2048/800 — so C2 vs
+M isolates the model at a fixed window and C1 vs C2 isolates the window at a
+fixed model. C1/C2 ran back-to-back from one script (`.equal_pool.sh`) with
+every other knob pinned (`--rerank-probability-scores`, cap 5, 2 sessions,
+item tokens 800, position weight 1.0, promotion 2). An earlier same-evening
+pair (arms B1/B2) had already contrasted the two models/windows on GPU, but at
+the time the token-window plumbing did not exist at all — no
+`--rerank-max-length` / `--rerank-doc-tokens` flags and no env vars for them
+(verified against the committed tree; both were written *after* those runs) —
+so any window contrast it measured went through the older character clip
+(`rerank_max_chars`). B is recorded below but not trusted for the decision.
+
+| arm | reranker | pair cap / doc budget | MRR | item MRR | entry nDCG@10 | decidable (n=30) | decisive | ambiguous | payload tokens | search mean |
+|---|---|---|---|---|---|---|---|---|---|---|
+| M (shipped) | MiniLM-L-6-v2 | 512 / 200 | 0.7584 | 0.7182 | 0.4845 | 0.567 | 0.767 | 0.300 | 2 408 | 0.72 s |
+| C2 | bge-reranker-v2-m3 | 512 / 200 | 0.7472 | 0.6966 | 0.4685 | 0.400 | 0.667 | 0.333 | 2 535 | 8.1 s |
+| C1 | bge-reranker-v2-m3 | 2048 / 800 | 0.7697 | 0.7416 | 0.4933 | **0.633** | **0.767** | **0.200** | 3 234 | 234 s |
+
+Three paired readings:
+
+- **C2 vs M — swapping the model alone is a regression.** decidable 0.567 →
+  0.400 (−8/+3 questions), item MRR 0.7182 → 0.6966. The 512/200 window was
+  sized for MiniLM, whose 512 learned positions make it a natural fit; the
+  same numbers handed to bge-reranker-v2-m3 clip 76.7 % of Edit/Write/MultiEdit
+  memories above 200 tokens — exactly the diff hunk or tool call the judge is
+  being asked to score. The judge does not get worse; it is fed less.
+- **C1 vs C2 — the window is the whole effect.** decidable 0.400 → 0.633
+  (+9/−2, exact McNemar p=0.065, one-sided 0.033), decisive present
+  0.667 → 0.767, ambiguity 0.333 → 0.200, entry nDCG@10 +0.0248 (p=0.074),
+  item MRR +0.0449 (p=0.13), payload +0.7k tokens. The proxy metrics move in
+  the same direction but under-claim the effect (recall@10 +0.012, p=0.55):
+  recall is labelled per *session*, and a bigger window rarely changes whether
+  a session is found — it changes whether the session's operative chunk
+  survives the judge's reading of it. This is the same
+  session-vs-entry blindness documented for the position tilt below.
+- **C1 vs M — the shipped configuration, challenged and held.** decidable
+  0.633 vs 0.567 (+6/−4, p=0.75), decisive identical at 0.767, ambiguity
+  0.300 → 0.200. No single comparison is significant at n=30, but every axis
+  points the same way, and the mechanism — the window binding on long
+  operative memories — is measured directly in the corpus, not inferred.
+
+**Why the average effect is small and the evidence effect is not.** The median
+memory entry is 151 characters, so any window ≥ ~600 tokens covers it whole;
+raising the budget cannot help the median document and does not. What it
+changes is the tail that carries the evidence: 24.5 % of memories exceed 200
+tokens, and among the Edit/Write/MultiEdit ones 76.7 % do. The questions the
+evidence harness asks are precisely questions about that tail — "does the
+payload show the edit for the file in question" — so a window that decides the
+tail decides the metric. The retrieval proxy averages over all 333 pairs and
+dilutes exactly the subset that moved.
+
+**Latency prices the window, and the price is hardware-shaped.** On the CPU
+the C series ran on (see below), C1 cost 234 s per search against C2's 8.1 s —
+a 29× multiplier for 4× the tokens, which is attention's quadratic growth plus
+more documents actually reaching the budget. On GPU the same window contrast
+measured ~3 s per search (B1) against ~1 s (B2). This is why the decision
+ships as *checkpoint-keyed defaults* rather than a bigger constant: a
+checkpoint that can read 8 194 positions defaults to 2048/800, MiniLM-era
+checkpoints keep 512/200, an explicit env/CLI value always wins, and a
+CPU-only deployment can still pin the small window back.
+
+**Provenance caveat, recorded because it bounds the claim.** The C series ran
+overnight at ~8–234 s per search; the B series, on the same configurations
+earlier the same evening, ran at ~1–3 s per search. The most likely reading is
+that B had the GPU and C fell back to CPU (the B/C per-query outputs agree
+closely — B1 vs C1 identical sequences 60/89, first-rank differences 4/89 —
+which is what a precision change, not a configuration change, produces), but
+this is inference from latency, not a logged fact: the reranker's
+`pair_tokens`/`doc_tokens` startup logging was added *because* this run made
+the mismatch invisible. Two consequences. First, the C1-vs-C2 window contrast
+is internally clean (same series, same device, everything pinned) and is the
+basis of the decision. Second, B's evidence-side reading of the same contrast
+(decidable 0.500 vs 0.467, flat) is not, and is superseded; its proxy-side
+reading (11/89 queries moved, MRR 0.747 → 0.764) agrees with C in direction.
+
+**Decision.** `rerank_max_length` and `rerank_doc_tokens` (and
+`rerank_probability_scores`, for the same one-time-surprise reason) resolve
+with the checkpoint when unset: bge-reranker-v2-m3 → 2048/800/probability
+scores on, everything else → 512/200/off. An end-to-end Answer pricing of the
++0.7k payload tokens is still owed, as is a GPU re-run of C1 before quoting
+its latency to the platform.
+
 ### Evidence sufficiency: the deterministic metric to tune against
 
 `eval/run_evidence.py` measures what our Search output actually carries, with no
@@ -855,6 +1039,75 @@ reader to tell which session a marker belongs to, so another session's edit can
 contradict the answer. n=30 means one question is 0.033, so these differences are
 directions with a mechanism, not established effects.
 
+### Baseline: pure RAG on the same index (2026-10-02)
+
+`scripts/baseline_dense_rag.py`. The question this baseline settles: how much
+does the memory machinery actually buy over the canonical RAG shape — embed the
+query, cosine top-k, return chunk text verbatim? The baseline patches
+`SearchService.handle` at runtime, adds memories through the ordinary `/add`
+path and reads the vectors Add already stored, so it shares the index (same
+chunks, same embeddings) with codemem and differs *only* in retrieval and
+assembly: no query planning, no channels, no identifier scoring, no fusion, no
+noise gate, no session quotas, no reranker.
+
+**On the file-overlap proxy, pure RAG beats the full machinery on every
+metric** (paired, 89 queries, RAG → codemem): session recall@10 0.7506 →
+0.4746 (Δ −0.276, p<0.001), session nDCG@10 0.7142 → 0.5230, entry MRR
+0.8141 → 0.7182, and even entry precision@10 0.6955 → 0.5361 — at a payload of
+100 entries spanning 21.6 sessions against codemem's 9.2 entries over 2. On
+the stricter shared-≥2-files labels the gap holds (session recall@10 0.880 vs
+0.660, −0.219, p<0.001), so this is not weak-label dilution. Two things
+produce it, and neither is a retrieval failure of our channels (the funnel
+shows 94.3 % of relevant sessions reach the pool): the **2-session budget**
+throws away everything ranked third or below — 16/89 queries emit no relevant
+session at all — and cosine similarity is genuinely good at this label, since
+sessions touching the same files share the vocabulary the query embeds near.
+
+**On the evidence metric, the ordering inverts — and the mechanism is
+ambiguity, not truncation** (30 questions, paired). The official API Guide's
+Runtime Rules cap the Answer stage at a 128 000-token shared window (8 192
+output + 2 048 safety reserved, **117 760 input tokens**), and state that
+"*if needed*, Answer keeps a token-counted prefix of Search candidates in
+returned rank order". At this corpus's scale neither payload approaches that
+budget — codemem returns ~2.4 k tokens, pure RAG ~44 k — so the prefix rule
+likely never fires here and the platform's operating point is the
+full-payload row below. The prefix rows are kept as a stress model of a
+tighter budget:
+
+| payload | RAG decidable | codemem decidable | RAG tokens | codemem tokens |
+|---|---|---|---|---|
+| @1 000 (stress) | 0.100 | 0.633 | 1 000 | 1 000 |
+| @2 000 (stress) | 0.400 | 0.600 | 2 000 | 1 860 |
+| @4 000 (stress) | 0.533 | 0.567 | 4 000 | 2 394 |
+| @8 000 (stress) | 0.567 | 0.567 | 8 000 | 2 408 |
+| **all (~the platform's operating point)** | **0.333** | **0.567** | 44 335 | 2 408 |
+
+The full-payload row is the mechanism in its purest form: RAG's 44 k-token
+payload contains the decisive evidence **93.3 %** of the time (codemem 76.7 %)
+— returning everything does find it — but a contradicting distractor appears
+for **63.3 %** of questions against codemem's 30.0 % (paired −10/0, p=0.0020),
+so decidable collapses to 0.333. With the whole payload visible, the answer
+model drowns rather than starves. Codemem's denoised 2.4 k-token payload holds
+0.567 at every budget, and would keep that property under a corpus large
+enough for the platform's prefix rule to actually bind — where the stress rows
+say it opens a 6× decidable lead at 1 000 tokens. The machinery's value is
+ambiguity control first, prefix efficiency second; its price is recall on a
+session-generous label plus ~0.6 s per search (146 ms for RAG, 724 ms for
+codemem, the reranker's share).
+
+**What this changes in how our own numbers are read.** The proxy's
+recall@10 0.4746 is a *payload-shape* number, not a retrieval number: lifting
+the session budget to 6 measured 0.6624 (precision@10 0.52 → 0.31) in the
+funnel work, still below RAG's 0.7506 on this label while precision stays
+above it. Quoting recall against a RAG baseline therefore requires quoting the
+payload sizes next to it — and since the platform's 117 760-token input budget
+admits even the 44 k-token payload whole, the consumer the small payload is
+built for is one that must not be drowned in same-repo contradictions. The
+end-to-end comparison has since been run (see the payload-shape comparison in
+the Answer-evaluation section): on file-localisation multiple choice neither
+payload shape separates from the no-memory prior — the discrimination now
+waits on harder question types or a budget-binding corpus scale.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
@@ -878,7 +1131,7 @@ Two predictions were tested and one failed:
 |---|---|---|---|---|---|---|
 | 0 (unlimited) | all | 1.000 | **0.667** | **0.567** | 0.267 | 67.1 |
 | 0 | top 3 | 1.000 | 0.633 | 0.500 | 0.267 | 67.1 |
-| **0** | **top 1 (default)** | 1.000 | 0.567 | **0.333** | **0.333** | 67.1 |
+| **0** | **top 1 (default then)** | 1.000 | 0.567 | **0.333** | **0.333** | 67.1 |
 | 0 | never | 1.000 | 0.500 | 0.367 | 0.300 | 67.1 |
 | 5 | top 1 | 0.933 | 0.400 | 0.167 | 0.333 | 13.9 |
 | 3 | top 1 | 0.900 | 0.333 | 0.100 | 0.267 | 8.6 |
@@ -936,7 +1189,8 @@ emission order and cutting the straddling one mid-way:
 
     python eval/run_evidence.py --prefix-tokens 1000 2000 4000 8000
 
-At shipped defaults (30 questions, mean 65.7 items / 6 518 tokens returned):
+At the defaults then in force (30 questions, cap 3, sessions uncapped; mean
+65.7 items / 6 518 tokens returned):
 
 | prefix | items visible | decisive | ambiguous | **decidable** |
 |---|---|---|---|---|
@@ -987,6 +1241,132 @@ breadth is not currently buying anything measurable, and that ambiguity — the
 dominant error mode — is 7x lower in the compact payload. The decision to leave
 `evidence_max_sessions=0` should be re-tested against an end-to-end Answer run
 before it is treated as settled.
+
+**Update (2026-09-25): this stand-off is resolved — see the next section.** The
+shipped defaults are now `max_evidence_per_session=5`,
+`evidence_max_sessions=2`, and promotion across the top 2 sessions, so the
+"leave it uncapped" recommendation above is history, superseded by the
+measurement below.
+
+### Confidence-aware multi-span: shorter payload, higher decidable (2026-09-25)
+
+The two linked open decisions — the per-session cap (3 was a stand-off with cap
+2) and the distinct-session cap (0, with a recommendation to re-test) — were
+revisited together with span selection, and shipped as one change
+(`7673cde`):
+
+- **`max_evidence_per_session` 3 → 5, `evidence_max_sessions` 0 → 2.** The
+  evidence-sufficiency audit found the decisive chunk often sits deep inside a
+  read-heavy trajectory, and a cap of 3 truncated before reaching it. With at
+  most two sessions in the payload, the answer session gets up to five slots to
+  expose its decisive evidence while distractor sessions stay out of the window.
+- **Operative promotion 1 → 2 sessions.** With at most two sessions admitted,
+  promoting the operative chunk in both recovers decisive evidence in either
+  candidate session without the ambiguity floodgate seen when every session was
+  promoted (0.567 at `-1`).
+- **Confidence-aware multi-span selection.** Only the top-ranked session's items
+  use the multi-span path of `_select_span`: every operative block (an operative
+  line plus bounded context) is preserved, then the remaining budget is filled
+  with the densest non-operative window. Later sessions keep the single best
+  window, so distractor operative lines do not inflate ambiguity. The prose fill
+  is skipped: once the operative signal is preserved, padding adds noise without
+  raising `decisive_present` (`evidence.py`).
+
+Measured on the 30-question evidence set, same machine, deterministic config
+(P1 path):
+
+| payload | mean tokens | decidable @2000 | decidable @all | ambiguity |
+|---|---|---|---|---|
+| before (cap 3, sessions uncapped, single-span) | 7 190 | 0.567 | 0.400 | 0.433 |
+| after (cap 5, sessions 2, multi-span top-1) | **2 434** | **0.567** | **0.500** | **0.333** |
+
+`decidable` at a 2 000-token prefix is unchanged while the payload shrinks 66 %,
+and the tail penalty shrinks with it (the gap @2000 → @all narrows from −0.167
+to −0.067). That resolves the cap-2 stand-off from the pricing table above: the
+window-coverage gain is now had by capping *sessions* instead of *slots per
+session*, so the per-session cap is free to move up and buy decisiveness
+(0.700 → 0.800 at the same sweep that set `evidence_item_tokens`).
+
+**Caveat carried from the pricing table's footnote:** the retrieval-proxy rows
+above this section (MRR 0.79, recall@10 0.73, item recall@10 0.58) were all
+measured under the pre-change defaults. The change alters which chunks are
+selected and how many sessions appear — a dimension file-overlap ground truth
+largely cannot see — but the headline retrieval numbers should be re-derived
+with `run_benchmark.py` before they are quoted in any submission material.
+
+### Entry-order emission: measured, rejected on the evidence axis (2026-10-02)
+
+`scripts/exp_entry_order.py`. The shipped assembler emits memories **session by
+session**: it walks the globally-scored candidate list grouped by session and
+drains up to `max_evidence_per_session` entries from each block. A session's
+weaker entries therefore travel ahead of another session's stronger ones. The
+hypothesis: emit **entries in global score order**, keeping the per-session cap
+merely as a quota, and the ordering the platform actually consumes (a
+token-counted prefix of `data[]`) improves.
+
+| arm | walk | per-session quota | entries avg | item nDCG@10 | item MRR | item precision@10 | item recall@10 |
+|---|---|---|---|---|---|---|---|
+| S0 (shipped) | session blocks | 5 | 9.2 | 0.4845 | 0.7182 | 0.5361 | 0.4746 |
+| S1 | global entry order | none | 40.3 | 0.5010 | 0.7428 | 0.6753 | 0.4718 |
+| S2 | global entry order | 5 | 9.2 | **0.5035** | **0.7438** | 0.5361 | 0.4746 |
+| S3 | global entry order | 1 | 2.0 | 0.5230 | 0.7584 | 0.5225 | 0.4746 |
+
+Recall, fusion, scoring and reranking are shared — every arm walks the same
+scored candidate list, and the pairing check confirms all four return the
+baseline's session set for 100 % of queries. Two implementation notes recorded
+because both produced silently wrong payloads before being caught: the noise
+gate must read a session's *best* evidence (gating every candidate ends the
+walk on a weak non-head chunk while later sessions' heads would have cleared
+it), and the session limit must stop *admission*, not the walk (breaking on the
+third session's head strands the admitted sessions' remaining quota). Both bugs
+showed up as payload sizes that could not be reconciled with the baseline
+(4.1 and 5.2 entries against 9.2).
+
+**S2 vs S0 is a pure ordering comparison over an identical item set** — same
+9.2 entries per query, item precision and item recall identical to four
+decimals, 0 queries moved — and global order wins: item nDCG@10 +0.0190
+[+0.0117, +0.0266], item MRR +0.0257 [+0.0103, +0.0444], both p < 0.001. The
+session-level view is invariant by construction (each session's head ranks
+above every other candidate of that session, so first-appearance session order
+cannot change). The quota axis confirms the cap is load-bearing: S1 floods to
+40.3 entries at 20.2 per session and gives back item recall@10 (−0.0028, one
+query). S3's nDCG advantage is the already-rejected proxy artifact: at quota 1
+each session emits only its head, so the item view collapses into the session
+view — the same reason cap=1 was refused in the tuning table (a two-item
+payload cannot carry a session's context).
+
+**But S0's block order is not an arbitrary walk — it carries the two
+intra-session levers** (position tilt, operative promotion) that the entry walk
+deliberately omits to isolate the ordering variable. So the decisive test is
+the evidence metric, run with the same entry assembler patched into
+`run_evidence.py` (`eval/results/ev_entry_cap5.json`), paired against the
+shipped assembler on the same 30 questions:
+
+| metric | shipped (ev_m_M) | entry order | paired |
+|---|---|---|---|
+| decisive present | 0.767 | 0.433 | 0 gained / 10 lost, p=0.0020 |
+| **decidable** | **0.567** | **0.300** | **0 / 8, p=0.0078** |
+| decidable @1 000-token prefix | 0.633 | 0.167 | — |
+| payload | 9.2 entries / 2 408 tok | 9.6 entries / 2 254 tok | comparable, so this is not a size effect |
+
+Not one question improved. The mechanism is the measured 12.9 % head-is-gold
+figure: the operative chunk rarely leads its session on `final` score, so
+global score order buries it behind whichever chunk scored highest overall,
+while the shipped walk hoists it with promotion and the tilt. The promotion
+ablation had already priced those levers at `decidable` +0.267 on a 1 000-token
+prefix — an order of magnitude more than the +0.019 nDCG the global walk gains.
+
+**Verdict: the session-major assembler stays.** The ordering gain is real but
+it prices the wrong thing: file-overlap labels reward moving *any* entry of a
+relevant session earlier, while the answer model needs the *operative* one
+readable in the prefix. The hypothesis is not reopened unless someone ports the
+position tilt and operative promotion into the global walk and prices that on
+`run_evidence.py`. For history: the 2026-09-21 run of this experiment (archived
+as `exp_entry_order_cap3_20260921.json`) had entry order winning item
+recall@10 by +0.064 under the cap-3, promotion-less assembler of the time —
+that diagnosis was correct, and the 2026-09-25 multi-span redesign absorbed
+it. Re-tested on the cured assembler, nothing is left to collect on the axis
+that decides answers.
 
 ### Chunk kind labels, audited against the corpus
 
@@ -1052,30 +1432,207 @@ reason is structural: `code` is 81% of the corpus, so a kind-level weight cannot
 isolate a 9% minority inside it. **Dropped.** Whatever promotes operative evidence
 has to read the chunk's lines, not its label — which is what
 `evidence_operative_weight` already does for span selection and has not yet been
-tried for ranking.
+tried for ranking. (It has since been tried, both bare and crossed with identifier
+evidence: see *Two attempts to move the 12.9%* below.)
+
+### Where the decisive chunk is lost, stage by stage
+
+Every number above is labelled per **session**, which asks "did any chunk of the
+right session make the window". The graded payload is per **chunk**, so two
+scripts now follow one pair — (query, relevant session) — through each stage and
+report where it dies: `scripts/attribute_recall_loss.py` (session unit) and
+`scripts/diagnose_entry_level.py` (chunk unit, which defines a *gold entry* as a
+memory whose extracted identifier is a file the task's patch touched).
+
+Session unit, shipped configuration (cap 5, `evidence_max_sessions` 2, dense +
+rerank on GPU, 333 relevant pairs over 89 queries; strong = ≥2 shared files):
+
+| stage | ALL survive | STRONG survive | lost at this stage |
+|---|---|---|---|
+| ≥1 entry in the recall pool | 94.3% | 99.0% | 5.7% |
+| ≥1 entry admitted for scoring (lexical/entity hit) | 85.3% | 94.1% | 9.0% |
+| ≥1 entry in the payload with the session budget lifted | 80.5% | 93.1% | 4.8% |
+| ≥1 entry emitted under `evidence_max_sessions=2` | **27.6%** | 49.5% | **52.9%** |
+| ≥1 entry inside the 10-slot window | 27.6% | 49.5% | 0.0% |
+
+The replay is exact: computing recall from these stages reproduces the live
+benchmark to the digit (0.475 vs the measured 0.4746 at 2 sessions; 0.662 vs
+0.6624 at 6). Three things it settles:
+
+- **Candidate generation is not the binding constraint, and neither is the
+  window.** 94.3% of relevant sessions are already pooled, and the last row's
+  zero is structural — the payload now averages 9.2 entries, so it *is* inside a
+  10-slot window. The old "reordering owns 59 % of the shortfall" decomposition was
+  measured at cap 3 with sessions uncapped (59 entries over 28.6 sessions), where
+  the window and the payload were different objects. It no longer applies.
+- **Emitting two sessions is what costs the recall**, and it is a policy choice:
+  lifting the budget to 6 moved the proxy from 0.4746 to 0.6624, while precision@10
+  fell 0.52 → 0.31 and the payload grew 9.2 → 24.4 entries.
+- **Ranking headroom is separable from breadth.** With a *perfect* session ranking,
+  2 sessions would reach 0.694 (against 0.475 achieved), 6 would reach 0.882, and
+  unlimited breadth tops out at 0.900 — so ~22 points are available from ranking at
+  any budget, and the remaining 10% of pairs are genuinely never pooled.
+  16 of 89 queries currently ship a payload containing **no** relevant session, and
+  all 16 are ranking failures: a gate-cleared relevant session existed and was
+  ranked third or worse.
+
+Chunk unit is much worse, and this is the number the session view hides. Of the 333
+relevant sessions: 85.9% contain at least one gold entry in the corpus, but only
+**40.5% have one in the recall pool**, and only **13.5% have one emitted** (strong
+labels: 95.0% → 65.3% → 27.7%). A relevant session averages 102 entries of which
+3.8 name a task file; 17.4 of its entries get pooled and 0.9 of those are gold —
+i.e. in 43.6% of the pooled cases the system grabbed a dozen siblings and missed the
+one chunk that matters. And the chunk that *carries the session's score* (its
+highest-ranked entry, which is what the session ranking compares) is a gold entry
+only **12.9%** of the time.
+
+**Deepening recall is zero-sum on this axis — measured.** Pulling
+`recall_per_channel` 120 → 600 and `candidate_pool` 300 → 2400 lifts gold-in-pool
+from 40.5% to 62.5%, but the deeper pool is mostly further siblings of the sessions
+already there, so gold reaching the payload falls 68.9% → 39.9% and the end-to-end
+figure is unchanged (13.5% → 13.2%). This corrects the earlier reading of the
+pool 300 → 800 experiment ("the cause is weak textual evidence, not truncation"):
+that was decided on `recall@100`, which is already saturated in the session view and
+structurally cannot see chunk identity. The conclusion stands, the evidence for it
+had to be re-derived.
+
+**Why re-weighting cannot fix the 12.9%.** Decomposing the leading session's head
+against a *losing* strong-relevant session's best gold entry (66 pairs):
+
+| term | head | gold entry | gap |
+|---|---|---|---|
+| normalized fused rank (`base`) | 0.872 | 0.623 | +0.249 |
+| channel `strength` | 0.844 | 0.621 | +0.223 |
+| `coverage` | 0.644 | 0.583 | +0.061 |
+| identifier evidence (`entity_signal`) | 0.224 | 0.117 | +0.107 |
+| final, pre-rerank | 0.826 | 0.606 | +0.221 |
+| final, post-rerank | 1.000 | 0.676 | **+0.324** |
+
+The gold entry loses on **all four** terms, and only 12.1% of them beat the leading
+head even before the cross-encoder ran. So no non-negative re-weighting of the
+existing blend can order these two correctly: this is a feature-space limit, not a
+calibration problem. (The cross-encoder, incidentally, *widens* the gap here —
++0.221 → +0.324 — consistent with the session-level reranking result above: it is
+good at choosing among a session's chunks and bad at comparing sessions, because it
+sees one chunk at a time.)
+
+### Two attempts to move the 12.9%: one rejected, one shipped
+
+Both target the fact that a session's score is carried by whichever of its ~100
+chunks matches the question loudest, which is usually a read of a file and not the
+edit that changed it.
+
+**`operative_rank_weight` — a fifth scoring term, measured worse, off by default.**
+The corpus says the decisive rows are rare and specific: among messages naming a
+file the task touched, only 17.8% record an edit, and `code` is 81% of the corpus.
+So a term for "this chunk records an action" was tried as a scoring term:
+
+| weight | head is a gold entry | gold emitted | head−gold score gap |
+|---|---|---|---|
+| 0 | 12.9% | 33.3% | +0.221 |
+| 0.1 | 12.3% | 33.3% | +0.237 |
+| 0.2 | 11.7% | 32.6% | +0.272 |
+| 0.3 | 10.8% | 31.1% | +0.306 |
+
+Monotonically the wrong way, for a reason the same dump shows: **the chunk that beat
+it is also an action record** — mean operative score 0.04 apart — so an unconditioned
+action term lifts the distractors as much as the answer. This is the same failure as
+promotion applied to every session (ambiguity 0.367 → 0.567). Rewritten as the
+interaction "records an action **and** names an identifier the question names" it
+went flat (head is a gold entry 12.9% → 12.9/13.2/12.9/12.6 across 0.1–0.5). Both
+forms stay switchable and off; the knob is retained because it is the cheapest way to
+re-test this if the corpus changes.
+
+**`evidence_position_weight` — intra-session, shipped at 1.0.** The signal that does
+separate reads from edits is *where* in the trajectory a chunk sits. Corpus
+measurement (300 sessions, no retrieval involved): the share of messages naming a
+patched file rises from 3.0% in the first decile of a session to 21.9% in the
+seventh; mean relative position 0.575 for such messages, 0.661 for the edits among
+them, 0.500 for all messages. Trajectories read before they change.
+
+The tilt applies only inside a session already chosen — `final × (1 + w·(rel−0.5))`
+over the chunk's row-id span within its session (`Store.session_span`) — so it cannot
+buy a distractor session a slot, which is exactly what killed the scoring-term form.
+Denominator: the 135 relevant sessions that have a gold entry in the pool.
+
+| weight | gold emitted | gained / lost | exact McNemar p | `decidable` (n=30) | `ambiguous` |
+|---|---|---|---|---|---|
+| 0 (was shipped) | 33.3% | — | — | 0.500 | 0.333 |
+| 0.6 | 39.3% | +8 / −0 | 0.0078 | 0.500 | 0.300 |
+| **1.0 (shipped)** | **42.2%** | **+12 / −0** | **0.0005** | **0.567** | **0.267** |
+| 1.5 | 44.4% | +15 / −0 | 0.0001 | 0.600 | 0.267 |
+| 2.0 | 44.4% | +15 / −0 | 0.0001 | 0.600 | 0.267 |
+
+Zero losses at every weight, and the strong-label subset agrees (28 → 37 at 1.0,
++9/−0, p=0.0039). Query-macro paired bootstrap +0.111 [+0.053, +0.179], p<0.001.
+`decisive_present` rose 0.733 → 0.767 while `ambiguous` fell, so the later chunk is
+not the noisier one. Payload size did not move at all (9.2 entries, ~1.86k tokens in
+the evidence run).
+
+**1.0, not the measured optimum 1.5.** The tilt spans `[1−w/2, 1+w/2]`; at 2.0 the
+first chunk of a session has its score annihilated. 1.0 caps the first-to-last
+difference at 3× and takes 80% of the plateau, and "zero losses" is 135 sessions of
+one corpus, not the platform's distribution. 1.5 is recorded as the measured optimum
+for whoever gets an end-to-end answer run to price it against.
+
+**What this change cannot be credited with.** It moves no proxy metric: all eleven
+benchmark numbers are identical to four decimal places, 0 of 89 queries changed, and
+that is expected — relevance is labelled per session there, and this only decides
+which chunk of a session is shown. `scripts/paired_compare.py` is what proves the
+invariance (it also reproduces the recorded cap 3 → 2 `item_recall@10` delta of
++0.0498 exactly, so its zero is not a broken comparison).
+
+**One side effect, caught by the suite.** The later chunk is sometimes a bare code
+block, so item #1 can now be the code rather than the sentence that names the file.
+`test_relevant_memory_ranks_first_despite_newer_distractors` failed for that reason
+and was widened from matching the word "checkout" to matching any of the relevant
+session's chunks: which chunk leads is the assembler's business, which *session*
+leads is what that test exists to protect.
+
+**Promotion is not redundant: the two levers act on different things.**
+`evidence_operative_promotion` was introduced for cap 3, when the edit sat eighth in
+its own session and never reached a slot, and on the *slot-membership* axis it no
+longer earns its keep with cap 5 — promotion off alone moves gold-emitted 33.3% ->
+34.1% (one session, noise), and with the tilt on, 43.0% without promotion against
+42.2% with it. That measurement is narrower than it looked. `run_evidence.py` scores
+what the answer model can read inside a token prefix, which is an *ordering* question
+inside the session, and there promotion is decisive: at tilt 1.0, promotion 2 -> 0
+takes `decisive_present` 0.733 -> 0.433 and `decidable` 0.600 -> 0.333 at a 1 000-token
+prefix, and 0.567 -> 0.367 across the whole payload (30 questions, so roughly nine moved
+the wrong way), while the payload shrinks 1 840 -> 1 637 tokens. So the tilt gets the right chunk *into* the payload
+and promotion puts it *first*; the proxy's "gold emitted" axis can only see the
+former, which is why it read as redundancy. Both stay on.
 
 ### Tuning decisions taken from measurements, not intuition
 
 | Decision | Evidence |
 |---|---|
-| Cap items per session at 3 | Recall@100 rose 0.845 → 0.919 and nDCG@100 0.681 → 0.705. Without a cap, ~100 returned chunks collapsed to ~23 distinct sessions, starving other relevant work. |
+| Keep session-major emission; reject entry-order assembly (2026-10-02) | Over a byte-identical item set (9.2 entries/query, 0 precision/recall movement), global score order does improve the ordering the platform cuts: item nDCG@10 +0.0190, item MRR +0.0257, both p<0.001 (`scripts/exp_entry_order.py`, S2 vs S0). But the shipped block order carries the position tilt and operative promotion, and on the evidence metric the entry walk without them loses decidable 0.567 → 0.300 (0 gained / 8 lost, p=0.0078; @1k prefix 0.633 → 0.167) with payload size unchanged. The proxy's gain is an order of magnitude smaller than the evidence loss; the walk order is not reopened unless the intra-session levers are ported into it and re-priced on `run_evidence.py`. The no-quota arm confirms the per-session cap is load-bearing (40.3 entries, 20.2/session flooding). |
+| Rerank window resolves with the checkpoint (2026-09-27) | bge-reranker-v2-m3 at the MiniLM-era 512/200 window is a regression against the shipped MiniLM default (decidable 0.567 → 0.400, −8/+3): 76.7 % of Edit/Write/MultiEdit memories exceed 200 tokens, so the budget clips exactly the operative evidence. Opening the window to 2048/800 recovers and passes it (0.633, +9/−2, one-sided p=0.033; entry nDCG@10 p=0.074) at +0.7k payload tokens and a latency price that is hardware-shaped (234 s/search CPU vs ~3 s GPU). So `rerank_max_length` / `rerank_doc_tokens` / `rerank_probability_scores` default to None and resolve per checkpoint (bge-reranker-v2-m3 → 2048/800/on; else 512/200/off); explicit values always win. The proxy's recall metrics under-claim the effect because they are labelled per session — the same session-vs-entry blindness as the position tilt. See the equal-pool section. |
+| Cap 5 per session, at most 2 sessions, multi-span top-1 (2026-09-25) | `decidable@all` 0.400 → 0.500, ambiguity 0.433 → 0.333, mean payload 7 190 → 2 434 tokens (−66 %) with `decidable@2k` unchanged — resolves the cap-3 stand-off by capping *sessions* instead of *slots per session*. Retrieval-proxy numbers elsewhere in this file predate the change; re-derive with `run_benchmark.py` before quoting them. |
+| Cap items per session at 3 | Recall@100 rose 0.845 → 0.919 and nDCG@100 0.681 → 0.705. Without a cap, ~100 returned chunks collapsed to ~23 distinct sessions, starving other relevant work. (Historical; superseded by the 2026-09-25 row above.) |
 | Reject the optimum at cap=1 | cap=1 measured marginally better recall (0.9231 vs 0.9193) but the proxy scores *whether a session was found*, not *whether its content is enough to answer*. Optimizing a measurable proxy at the cost of an unmeasurable quality is how benchmarks get gamed; cap=3 keeps session context for a 0.4 % metric difference. |
 | Rerank weight 0.65, temperature 2.0 | Both swept. Weight: 0.65 peaks (MRR 0.7716); 0.85 and 0.95 degrade (0.7311, 0.7347) even though precision@10 rises — precision@10 is not what the answer model needs. |
 | End-to-end result reported as null, not as a win | 0.689 vs 0.689 with 4 gained / 4 lost and p=0.72 is indistinguishable from chance. Reporting the aggregate as anything other than "no detectable effect" would be reading noise, and the paired no-memory condition exists precisely to make that visible. |
 | Session-major candidate pool off by default | Measured on the same machine: MRR +0.019 (p=0.25) against item recall@10 −0.019 (p=0.25) — noise in both directions, and the one thing it clearly does (widen the payload) is the thing the earlier pool 300→800 experiment showed is not the binding constraint. |
 | Session-level reranking off | Every metric sits below the entry-level stage (MRR −0.059, p=0.006) and lowering the blend weight drifts monotonically back toward the baseline — the attenuation signature of noise, not signal. A single chunk does not stand for a 96-entry session. |
-| `max_evidence_per_session` left at 3 | cap 2 measures item recall@10 +0.0498 (p<0.001), but with zero queries changing session MRR it is a window effect, not a ranking gain. Priced against `run_evidence.py`, every prefix row of cap 3 is ≥ cap 2 and `decisive` falls monotonically as the cap tightens (0.733 → 0.700 → 0.633 → 0.500 at cap 1). The gain is on a proxy of window coverage, the loss on a proxy of usefulness — so the default stays. |
+| `max_evidence_per_session` left at 3 | cap 2 measures item recall@10 +0.0498 (p<0.001), but with zero queries changing session MRR it is a window effect, not a ranking gain. Priced against `run_evidence.py`, every prefix row of cap 3 is ≥ cap 2 and `decisive` falls monotonically as the cap tightens (0.733 → 0.700 → 0.633 → 0.500 at cap 1). The gain is on a proxy of window coverage, the loss on a proxy of usefulness — so the default stays. **Superseded 2026-09-25: the cap moved to 5, with the window-coverage gain instead obtained by capping distinct sessions at 2; see the multi-span section.** |
 | Listwise reranking off by default | Every setting scored below the no-listwise configuration and cost ~5x search latency. See the table above; the attenuation signature shows it adds noise here, but the proxy measures file overlap rather than usefulness, so this is unresolved rather than settled. |
 | Dense enabled by default, device `auto` | The dense cost/benefit flips with hardware (see the table above). `auto` resolves to CUDA when present and CPU otherwise, so one image is fast on a GPU host and still contract-compliant on a CPU one, rather than being tuned for whichever machine happened to measure first. |
 | Rerank pool 120 | MRR 0.684 / 0.746 / 0.772 at top_n 30 / 60 / 120: larger is better, and on GPU the 120-pool costs 0.5 s per search, so there is no reason to shrink it. |
 | Fixed rerank temperature, not max-normalisation | Normalising by the head's maximum score made every contribution depend on which items happened to be reranked, so changing `rerank_top_n` produced an incoherent sequence (MRR 0.818 → 0.772 → 0.684 as the pool grew). A fixed temperature makes the mapping absolute; the sequence is now monotone (0.684 → 0.746 → 0.772 for top_n 30 → 60 → 120). This also means the earlier 0.8183 figure was an artifact of the flawed normalisation, which is why every number above was re-measured. |
 | Clip rerank documents by token count, in one batch | Characters are a bad cost proxy on this model family: 2 048 characters can be 630 tokens while 40 characters is 21, and latency scales with real tokens (4 ms/doc at 21 tokens, 48 ms/doc at 1 034). Token clipping took long-memory reranking from 48 to ~14 ms/doc. Batching the tokenizer call (120 docs in one call rather than 120 calls) took the pool of 120 from 6.0 s to 2.1 s. |
 | Keep the noise gate at 0.15 | On this benchmark gate=0 and gate=0.15 score identically, because lexical/entity recall already bounds the candidate set: the gate is not the active constraint here. It is retained because its purpose is the *unrelated-query* case, which this dataset does not exercise — that case is covered by `tests/test_ranking_scale.py` with synthetic same-repo noise. |
-| Promote the operative chunk, but only within the top session | Promoting it in every session raised decisive evidence 0.500 → 0.667 and ambiguity 0.367 → 0.567 simultaneously, netting *below* baseline. Restricted to the session we already rank first it gained on all three axes (0.567 / 0.333 / 0.333). The same lever applied everywhere is the same lever applied to evidence we do not believe. |
-| Do not cap distinct sessions (`evidence_max_sessions=0`) | The prediction was that tightening the cap buys precision with coverage we could spare, since the answer session was retrieved 100% of the time. Wrong: it is in the payload 100% of the time but is the *top-ranked* session only 70% of the time, so `decidable` stayed flat while decisive fell. What actually needs work is session ranking, not assembly breadth. **Under the prefix metric this is now much less clear** — `max_sessions=1` scores the same `decidable` at 676 tokens instead of 6 518; see the section above. Re-test before treating this as settled. |
+| Promote the operative chunk, but only within the top session | Promoting it in every session raised decisive evidence 0.500 → 0.667 and ambiguity 0.367 → 0.567 simultaneously, netting *below* baseline. Restricted to the session we already rank first it gained on all three axes (0.567 / 0.333 / 0.333). The same lever applied everywhere is the same lever applied to evidence we do not believe. **Extended 2026-09-25:** with at most 2 sessions admitted, promotion now covers the top 2 (`evidence_operative_promotion=2`). |
+| Do not cap distinct sessions (`evidence_max_sessions=0`) | The prediction was that tightening the cap buys precision with coverage we could spare, since the answer session was retrieved 100% of the time. Wrong: it is in the payload 100% of the time but is the *top-ranked* session only 70% of the time, so `decidable` stayed flat while decisive fell. What actually needs work is session ranking, not assembly breadth. **Under the prefix metric this became much less clear** — `max_sessions=1` scores the same `decidable` at 676 tokens instead of 6 518. **Superseded 2026-09-25: the cap ships at 2** (`decidable@all` 0.400 → 0.500, ambiguity −23 %, payload −66 %); an end-to-end Answer re-test is still owed. |
 | Session-major assembly is free on the retrieval proxy | MRR 0.7800 and recall@10 0.7186 unchanged, nDCG@100 0.7306 → 0.7368, items 67 → 59. File-overlap ground truth cannot distinguish which chunk of a session leads, so a change that only affects chunk *identity* inside a session shows up as no cost. |
 | Chunk kind labels tightened against the corpus audit | 95% of `config` chunks were the task prompt and 43% of `diff` chunks had no hunk at all (`scripts/audit_chunk_kinds.py`). Kept on index-correctness grounds: the flat-to-mixed metric movement (recall@10 +0.0028, nDCG@10 −0.0075) is within one query, and the label decides which entity extractors run, which file overlap cannot price. |
 | No `code` bonus for debug intent | Operative evidence is concentrated in `code` chunks (2 869 of 3 464), but weighting the kind cost recall@10 (0.7214 → 0.7115), precision@10 (0.2323 → 0.2267) and mean prefix `decidable` (0.408 → 0.383) while only MRR rose. A kind label cannot isolate a 9% minority inside it. |
+| Intra-session position tilt on at 1.0 (`evidence_position_weight`) | The chunk carrying a session's score names a task file only 12.9% of the time; tilting slot choice toward the end of that trajectory takes it to 42.2% (+12 gained / −0 lost, exact McNemar p=0.0005; strong labels +9/−0), raises `decidable` 0.500 → 0.567 and lowers `ambiguous` 0.333 → 0.267, with payload size unmoved. 1.5 measures better (44.4%) but at w=2.0 the first chunk's score is annihilated, so the bound decided. The proxy benchmark cannot see this change at all — which is expected, not a null result. |
+| Operative evidence as a fifth **scoring** term, off | It made its own target worse, monotonically in the weight (head-is-gold 12.9% → 10.8% at 0.3), because the chunk that beat the gold entry is itself an action record (operative scores 0.04 apart). Rewritten as "action **and** a queried identifier": flat across 0.1–0.5. Kept switchable, not shipped. |
+| Widening recall depth/pool is not the entry-level fix | `recall_per_channel` 120 → 600 with pool 300 → 2400 lifts gold-in-pool 40.5% → 62.5% and costs gold-in-payload 68.9% → 39.9% — end to end 13.5% → 13.2%, i.e. zero, because the deeper slice is more siblings of sessions already present. The older pool 300 → 800 conclusion was right but had been read off a session metric that structurally cannot see chunk identity. |
+| Session-presence rates are not delivery rates | "94.3% of relevant sessions are pooled" means ≥1 chunk of ~102. Every funnel claim now has to be read at chunk level (`scripts/diagnose_entry_level.py`), where the same stage is 40.5%. |
+| `evidence_operative_promotion` stays at 2, though it measures redundant on one axis | With the position tilt on, turning promotion off *helped* the slot-membership proxy (gold emitted 42.2% -> 43.0%) and wrecked the prefix metric: `decisive_present` 0.733 -> 0.433 and `decidable` 0.600 -> 0.333 at a 1 000-token prefix (0.567 -> 0.367 over the whole payload; n=30, about nine questions the wrong way), payload 1 840 -> 1 637 tokens. The tilt decides which chunk gets into the payload; promotion decides which one the answer model reads first. A proxy that can see only the former is not a licence to delete the latter. |
 
 ### What this benchmark cannot tell us
 

@@ -19,6 +19,8 @@ data/
 benchmark/
 eval/data/
 eval/results/
+.equal_pool.log
 .workbuddy
 .codebuddy
-docs\coding-agent-memory-papers.md
+docs/coding-agent-memory-papers.md
+issue.md
