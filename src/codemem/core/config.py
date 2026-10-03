@@ -18,7 +18,7 @@ def _env_str(name: str, default: str | None) -> str | None:
     return value if value not in (None, "") else default
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int | None) -> int | None:
     raw = os.environ.get(name)
     if raw in (None, ""):
         return default
@@ -38,11 +38,49 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_bool(name: str, default: bool) -> bool:
+def _env_bool(name: str, default: bool | None) -> bool | None:
     raw = os.environ.get(name)
     if raw in (None, ""):
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Rerank-window defaults that travel with the checkpoint. The window is a
+# property of the model, not a free knob: the pair cap must fit the learned
+# positions (MiniLM-L-6 has 512, bge-reranker-v2-m3 has 8 194), and the
+# per-document budget decides whether the judge ever sees the diff or the
+# tool call it is being asked to judge. Measured on the proxy benchmark
+# (eval/README.md, the equal-pool window experiment): bge-reranker-v2-m3 at
+# the MiniLM window (512/200) scores decidable 0.400 — below the shipped
+# MiniLM default (0.567) — because 76.7 % of Edit/Write/MultiEdit memories
+# exceed 200 tokens and are truncated exactly where the operative evidence
+# sits; at 2048/800 it reaches 0.633 (+9/−2 questions, one-sided p=0.033).
+# Latency prices the difference: ~8 s/search at 200 tokens and ~234 s on CPU
+# at 800 (GPU ~3 s), so the big window only makes sense for checkpoints that
+# can actually read it — which is what keying it to the model encodes.
+_RERANK_CHECKPOINT_DEFAULTS: dict[str, dict[str, int | bool]] = {
+    "bge-reranker-v2-m3": {
+        "rerank_max_length": 2048,
+        "rerank_doc_tokens": 800,
+        "rerank_probability_scores": True,
+    },
+}
+# Unknown checkpoints keep the MiniLM-era window: 512 learned positions and
+# the 200-token document budget measured against this corpus.
+_RERANK_FALLBACK_DEFAULTS: dict[str, int | bool] = {
+    "rerank_max_length": 512,
+    "rerank_doc_tokens": 200,
+    "rerank_probability_scores": False,
+}
+
+
+def _rerank_checkpoint_defaults(model: str) -> dict[str, int | bool]:
+    for key, values in _RERANK_CHECKPOINT_DEFAULTS.items():
+        if key in model:
+            merged = dict(_RERANK_FALLBACK_DEFAULTS)
+            merged.update(values)
+            return merged
+    return dict(_RERANK_FALLBACK_DEFAULTS)
 
 
 @dataclass(slots=True)
@@ -120,6 +158,54 @@ class Settings:
     # decisive line survived into the returned window only 30% of the time while
     # the session itself was retrieved 100% of the time.
     evidence_operative_weight: float = 1.0
+    # The same signal as a fifth term in the *ranking* score. Measured and
+    # rejected; kept switchable because it is the cheapest way to re-test the
+    # idea if the corpus changes.
+    #
+    # What it was meant to fix (scripts/diagnose_entry_level.py): the chunk that
+    # carries a session's score names a file the task touched only 12.9% of the
+    # time, and it loses to the winner on all four current terms, so no
+    # re-weighting of what exists can order them -- a new term is needed.
+    #
+    # Both forms tried failed on their own target. Bare "this chunk records an
+    # action" moved head-is-gold 12.9% -> 12.3 -> 11.7 -> 10.8 as the weight rose
+    # 0.1 -> 0.3, because the chunk that beat the gold entry is itself an action
+    # record (operative scores 0.04 apart): distractor sessions are full of edits
+    # to *other* files. Crossed with "and names an identifier the question names"
+    # it went flat across 0.1-0.5. The shipped fix is instead intra-session only,
+    # below. Non-zero weights rescale the other four terms, so the 0..1 range the
+    # noise gate is calibrated against is preserved either way.
+    operative_rank_weight: float = 0.0
+    # Intra-session position prior, applied only when choosing *which* chunks of
+    # an already-chosen session take the slots. On by default at 1.0.
+    #
+    # Why this signal: trajectories read a file before they change it. Among the
+    # messages naming a file the task's patch touched (300-session corpus), the
+    # ones recording an edit sit at relative position 0.661 against 0.500 for all
+    # messages, and the share of messages naming such a file rises from 3.0% in
+    # the first decile to 21.9% in the seventh.
+    #
+    # Measured (scripts/diagnose_entry_level.py, n=89 queries; the denominator is
+    # the 135 relevant sessions whose task-file-naming chunk reached the recall
+    # pool): that chunk is returned for 33.3% of them with this off, 42.2% at 1.0
+    # (+12 sessions gained, 0 lost, exact McNemar p=0.0005) and 44.4% at 1.5,
+    # where it plateaus. `decidable` in eval/run_evidence.py rose 0.500 -> 0.567
+    # and `ambiguous` fell 0.333 -> 0.267, so the later chunk is not the noisier
+    # one; payload size did not move. The proxy retrieval benchmark cannot see
+    # this change at all (0 metrics moved), because relevance there is labelled
+    # per session and this only swaps which chunk of a session is shown.
+    #
+    # Why 1.0 and not the measured optimum 1.5: the tilt spans [1-w/2, 1+w/2], so
+    # at 1.0 the first and last chunk of a session differ by at most 3x, while at
+    # 2.0 the first chunk's score is annihilated outright. 1.0 takes 80% of the
+    # plateau with a bound that still lets a clearly better chunk win, and the
+    # zero-loss record is 135 sessions of one corpus, not the platform's.
+    #
+    # Deliberately not a term in the ranking score: a global late-is-better prior
+    # would credit the tail of every distractor session too, which is how the bare
+    # operative term (`operative_rank_weight`) measured 12.9% -> 10.8% on its own
+    # target.
+    evidence_position_weight: float = 1.0
     # Total budget for the whole `data` payload (platform input window minus
     # answer/safety reservation; kept well under 117_760 on purpose).
     evidence_budget_tokens: int = 60_000
@@ -209,6 +295,44 @@ class Settings:
     # on very large trajectories.
     dense_max_per_add: int = 400
 
+    # ---- dense-only admission -------------------------------------------
+    # A candidate normally has to be found by `lexical` or `entity` to be scored
+    # at all (INFORMATIVE_CHANNELS). That makes dense a half-channel: it can
+    # re-order what the lexical channels already found, but a memory *only* it
+    # found is discarded, so it cannot recall anything. These three let such a
+    # candidate become scoreable, behind an absolute floor.
+    #
+    # Off by default and unmeasured; see eval/README.md for how to read it. The
+    # floor is the entire mechanism. In a same-repository corpus every neighbour
+    # is somewhat similar, so admitting on a *relative* threshold would let an
+    # unrelated query return its closest distractor — exactly the failure the
+    # eligibility rule exists to prevent (`tests/test_ranking_scale.py`).
+    dense_eligible: bool = False
+    # Absolute cosine floor for dense-only admission, deliberately above
+    # `dense_min_similarity`: that one merely filters what enters the recall
+    # pool, this one decides what may be scored and therefore returned.
+    dense_eligible_min_similarity: float = 0.45
+    # Cap on dense-only candidates admitted per query. 0 = unlimited.
+    dense_eligible_max: int = 0
+    # ---- dense fill (append-only) ---------------------------------------
+    # A second, deliberately weaker form of the same idea. Instead of making a
+    # dense-only candidate a normal competitor, this appends a few of them
+    # *after* assembly, so every decision the lexical channels made is untouched:
+    # no re-ranking, no session slot consumed, no score of theirs recomputed.
+    #
+    # The trade is that they land at the tail, which is exactly where a
+    # token-counted prefix cuts — so this only pays off when the head is short.
+    # Off by default and unmeasured.
+    dense_fill: bool = False
+    # Absolute cosine floor, applied on top of `dense_min_similarity` (0.30),
+    # which already filtered what entered the recall pool.
+    dense_fill_min_similarity: float = 0.50
+    # How many entries to append. They are extra, never replacements.
+    dense_fill_max: int = 4
+    # Per-entry budget for an appended item. Kept at the pointer size: these are
+    # a lead, not evidence, so they should not spend the head's token budget.
+    dense_fill_tokens: int = 110
+
     # ---- rerank ---------------------------------------------------------
     # On by default: it is the single largest measured gain (MRR +0.093,
     # nDCG@10 +0.067) and costs Add nothing, since it runs only at search time.
@@ -217,6 +341,20 @@ class Settings:
     rerank_enabled: bool = True
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_device: str = "auto"
+    # The pair cap the cross-encoder actually reads. This is a property of the
+    # checkpoint, not a policy choice: MiniLM-L-6 has 512 learned positions,
+    # bge-reranker-v2-m3 has 8 194. None resolves with the checkpoint (see
+    # `_RERANK_CHECKPOINT_DEFAULTS`); an explicit value is respected, which is
+    # how a deployment pins a smaller window for latency.
+    rerank_max_length: int | None = None
+    # How much of each memory the judge reads, in tokens, clipped with the model's
+    # own tokenizer. Measured on this corpus: 24.5 % of memories and 76.7 % of the
+    # Edit/Write/MultiEdit ones exceed 200 tokens, so at 200 the distinction this
+    # stage exists to make — `Read` versus `Edit` on the same file — falls outside
+    # the window for most of the operative evidence. Keep it below
+    # `rerank_max_length` minus the query, or the pair cap clips instead.
+    # None resolves with the checkpoint.
+    rerank_doc_tokens: int | None = None
     # How many fused candidates to send through the cross-encoder. It is
     # O(pool) forward passes, so this is the latency knob.
     rerank_top_n: int = 120
@@ -233,8 +371,9 @@ class Settings:
     # Some cross-encoders (the bge-reranker family) emit a 0..1 relevance
     # score instead of an unbounded logit. Feeding those through the sigmoid
     # above flattens every candidate towards 0.5 and destroys the ordering, so
-    # with this set the score is used as it comes.
-    rerank_probability_scores: bool = False
+    # with this set the score is used as it comes. None resolves with the
+    # checkpoint: True for the bge-reranker family, False elsewhere.
+    rerank_probability_scores: bool | None = None
     # Cross-encoder context cap. Memory chunks can be long; truncating keeps
     # per-pair cost bounded.
     rerank_max_chars: int = 2000
@@ -279,6 +418,19 @@ class Settings:
     # already does. See eval/README.md.
     rerank_session_level: bool = False
 
+    def __post_init__(self) -> None:
+        # None means "not set": the window and the score form travel with the
+        # checkpoint. An explicitly provided value (constructor, env, or the
+        # service's override path) is never touched here.
+        resolved = _rerank_checkpoint_defaults(self.rerank_model)
+        for name in ("rerank_max_length", "rerank_doc_tokens"):
+            if getattr(self, name) is None:
+                setattr(self, name, resolved[name])
+        if self.rerank_probability_scores is None:
+            self.rerank_probability_scores = resolved[
+                "rerank_probability_scores"
+            ]
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / self.db_filename
@@ -321,6 +473,14 @@ class Settings:
             _env_float("CODEMEM_EVIDENCE_OPERATIVE_WEIGHT", 1.0),
         )
         put(
+            "operative_rank_weight",
+            _env_float("CODEMEM_OPERATIVE_RANK_WEIGHT", 0.0),
+        )
+        put(
+            "evidence_position_weight",
+            _env_float("CODEMEM_EVIDENCE_POSITION_WEIGHT", 1.0),
+        )
+        put(
             "max_evidence_per_session",
             _env_int("CODEMEM_MAX_EVIDENCE_PER_SESSION", 5),
         )
@@ -358,10 +518,30 @@ class Settings:
             _env_float("CODEMEM_DENSE_MIN_SIMILARITY", 0.30),
         )
         put("dense_max_per_add", _env_int("CODEMEM_DENSE_MAX_PER_ADD", 400))
+        put("dense_eligible", _env_bool("CODEMEM_DENSE_ELIGIBLE", False))
+        put(
+            "dense_eligible_min_similarity",
+            _env_float("CODEMEM_DENSE_ELIGIBLE_MIN_SIMILARITY", 0.45),
+        )
+        put("dense_eligible_max", _env_int("CODEMEM_DENSE_ELIGIBLE_MAX", 0))
+        put("dense_fill", _env_bool("CODEMEM_DENSE_FILL", False))
+        put(
+            "dense_fill_min_similarity",
+            _env_float("CODEMEM_DENSE_FILL_MIN_SIMILARITY", 0.50),
+        )
+        put("dense_fill_max", _env_int("CODEMEM_DENSE_FILL_MAX", 4))
+        put("dense_fill_tokens", _env_int("CODEMEM_DENSE_FILL_TOKENS", 110))
         put("rerank_enabled", _env_bool("CODEMEM_RERANK_ENABLED", True))
         put(
             "rerank_model",
             _env_str("CODEMEM_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        )
+        put("rerank_max_length", _env_int("CODEMEM_RERANK_MAX_LENGTH", None))
+        put("rerank_doc_tokens", _env_int("CODEMEM_RERANK_DOC_TOKENS", None))
+        put("rerank_max_chars", _env_int("CODEMEM_RERANK_MAX_CHARS", 2000))
+        put(
+            "rerank_probability_scores",
+            _env_bool("CODEMEM_RERANK_PROBABILITY_SCORES", None),
         )
         put("rerank_device", _env_str("CODEMEM_RERANK_DEVICE", "auto"))
         put("rerank_top_n", _env_int("CODEMEM_RERANK_TOP_N", 120))

@@ -182,7 +182,8 @@ CREATE TABLE IF NOT EXISTS supersedes (
     PRIMARY KEY (old_memory_id, new_memory_id)
 ) WITHOUT ROWID;
 
--- Dense vectors kept beside the row id; loaded into FAISS at startup.
+-- Dense vectors kept beside the row id; searched brute-force within one
+-- user_id at query time (Store.dense_search). No external vector index.
 CREATE TABLE IF NOT EXISTS memory_vector (
     memory_id INTEGER PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE,
     user_id   TEXT NOT NULL,

@@ -75,11 +75,28 @@ def _kind_bonus(kind: str, intent: str) -> float:
     return INTENT_KIND_BONUS.get(intent, {}).get(kind, 1.0)
 
 
+def _operative_term(text: str, cap: int = 3) -> float:
+    """0..1 grade of "this chunk records an action", from its own lines.
+
+    Bounded rather than proportional: a chunk with one ``[tool Edit]`` line and a
+    diff hunk with ten marker lines carry the same kind of evidence, and letting
+    the count scale linearly would turn large diffs into outliers in the blend.
+    """
+    total = sum(_operative_score(line) for line in text.splitlines())
+    if not total:
+        return 0.0
+    return min(1.0, total / cap)
+
+
 def score_candidates(
     candidates: list[Candidate],
     memories: dict[int, MemoryRow],
     plan: QueryPlan,
     entity_match_by_memory: dict[int, float],
+    *,
+    dense_only_min_similarity: float | None = None,
+    dense_only_max: int = 0,
+    operative_weight: float = 0.0,
 ) -> list[Candidate]:
     """Assign a normalized, strictly decreasing ``final`` score to candidates.
 
@@ -97,14 +114,58 @@ def score_candidates(
     within this query so questions of differing identifier density stay
     comparable.
 
+    ``operative_weight`` (0 = off) adds a fifth term, "this chunk records an
+    action", and rescales the other four so the total stays on the same 0..1
+    scale the noise gate is calibrated against.
+
     The blend includes a *strength* term on purpose. Pure rank fusion discards
     magnitude, so a memory that wins BM25 by five times looks almost identical
     to one that barely cleared the match — and a merely-recent, unrelated memory
     can then displace a decisive match. Restoring magnitude fixes that.
+
+    Dense-only admission
+    --------------------
+    ``dense_only_min_similarity`` (``None`` keeps the behaviour above) admits a
+    candidate that *only* the dense channel found. Two properties make this the
+    narrow form of the change:
+
+    * it is **additive** — an already-eligible candidate is scored from exactly
+      the same terms as before, because its ``strength`` still comes from
+      ``lexical``/``entity``. A dense-only entry joins the ranking; it cannot
+      change another candidate's own score, only that candidate's position if it
+      happens to outrank it;
+    * the floor is **absolute**, not normalized. Admitting on a relative
+      threshold would let an unrelated query return its nearest distractor in a
+      corpus where every neighbour is somewhat similar.
+
+    A strength term is mandatory rather than cosmetic here. A dense-only
+    candidate has coverage 0 and no identifier evidence, so its score would be
+    ``0.40 * base`` alone — and with ``dense`` weighted 0.70 against a
+    lexical+entity head at 2.15, ``base`` lands near 0.33, putting it at ~0.13,
+    *under* the 0.15 noise gate. It would be admitted and then dropped. Its
+    strength is therefore the cosine distance above the floor, which is an
+    absolute quantity and is below 1.0 unless the match is near-identical.
     """
-    eligible = [
+    informative = [
         c for c in candidates if any(name in c.channels for name in INFORMATIVE_CHANNELS)
     ]
+    dense_only: list[Candidate] = []
+    dense_only_ids: set[int] = set()
+    if dense_only_min_similarity is not None:
+        found = [
+            c
+            for c in candidates
+            if not any(name in c.channels for name in INFORMATIVE_CHANNELS)
+            and c.channel_scores.get("dense", 0.0) >= dense_only_min_similarity
+        ]
+        # Best-match first, so the cap keeps the strongest neighbours.
+        found.sort(key=lambda c: (-c.channel_scores.get("dense", 0.0), c.memory_id))
+        if dense_only_max > 0:
+            found = found[:dense_only_max]
+        dense_only = found
+        dense_only_ids = {c.memory_id for c in found}
+
+    eligible = informative + dense_only
     if not eligible:
         return []
 
@@ -138,6 +199,21 @@ def score_candidates(
             if score is not None and top > 0:
                 strength = max(strength, score / top)
 
+        # A dense-only candidate has no informative-channel score to normalize,
+        # so its strength is how far its cosine sits above the admission floor.
+        # Deliberately not normalized against the pool: dividing by the best
+        # similarity would hand every admitted candidate a strength near 1.0 in
+        # a corpus where all neighbours are alike, which is the same trap
+        # max-normalisation set for the cross-encoder.
+        if cand.memory_id in dense_only_ids and dense_only_min_similarity is not None:
+            span = 1.0 - dense_only_min_similarity
+            if span > 0:
+                similarity = cand.channel_scores.get("dense", 0.0)
+                strength = max(
+                    strength,
+                    max(0.0, min(1.0, (similarity - dense_only_min_similarity) / span)),
+                )
+
         # Normalized identifier evidence, damped: one strong match helps, but a
         # memory must not win on identifiers alone, since same-repository
         # distractors share paths too.
@@ -151,16 +227,39 @@ def score_candidates(
         kind = memory.structural_kind if memory is not None else "chunk"
         bonus = _kind_bonus(kind, plan.intent)
 
+        # The fifth term, off unless ``operative_weight`` is set. Motivated by a
+        # measurement (scripts/diagnose_entry_level.py): the chunk that carries
+        # the session's score is the one naming a task file only 12.9% of the
+        # time, because a read of that file outscores the edit that changed it on
+        # every channel -- the paths carry the term weight, the verb carries
+        # none. `assemble` already fixes this *inside* a session by promotion;
+        # this fixes it in the score, which is what decides which session and
+        # which chunk survive the token prefix.
+        #
+        # It has to be the product, not the bare operative flag. Plain
+        # ``_operative_term`` was measured first and moved every number the wrong
+        # way, monotonically in the weight (head_is_gold 12.9% -> 12.3 -> 11.7 ->
+        # 10.8; gold reaching the payload 33.3% -> 31.1). The reason is that
+        # distractor sessions are full of edits too -- of *other* files -- so an
+        # unconditioned action term lifts the competition as much as the answer,
+        # which is the same failure recorded for promotion applied to every
+        # session (ambiguity 0.367 -> 0.567). Requiring the chunk to also name an
+        # identifier the question names is what makes it the edit you care about.
+        operative = 0.0
+        if operative_weight and memory is not None:
+            operative = _operative_term(memory.text) * entity_signal
+
         # Superseded memories stay visible but rank lower: an old fix that a
         # later session replaced is still potentially the useful precedent.
         penalty = 0.65 if (memory is not None and memory.superseded_by) else 1.0
 
-        combined = (
+        share = 1.0 - operative_weight
+        combined = share * (
             RRF_WEIGHT_IN_FINAL * base
             + COVERAGE_WEIGHT_IN_FINAL * coverage
             + STRENGTH_WEIGHT_IN_FINAL * strength
             + ENTITY_WEIGHT_IN_FINAL * entity_signal
-        )
+        ) + operative_weight * operative
         cand.final = combined * bonus * penalty
 
     scored = sorted(
@@ -433,6 +532,32 @@ def _select_span(
     return span, truncated
 
 
+def _position_ordered(
+    group: list[Candidate], span: tuple[int, int], weight: float
+) -> list[Candidate]:
+    """Re-order one session's candidates by score nudged toward the trajectory's end.
+
+    Intra-session on purpose. Which sessions are emitted, and in what order, is
+    decided upstream by ``final``; this only chooses among the chunks of a session
+    that has already been chosen, so a "later is more decisive" prior cannot buy
+    a distractor session a slot -- the failure mode that made the same signal
+    useless as a scoring term (see ``operative_rank_weight``).
+
+    The tilt is multiplicative and bounded by ``weight``/2, so a candidate cannot
+    be promoted past another that scores more than ``weight``/2 above it: with
+    0.4, a sibling at 0.60 can overtake one at 0.85 but not one at 0.95.
+    """
+    lo, hi = span
+    if hi <= lo or weight <= 0:
+        return group
+
+    def adjusted(cand: Candidate) -> float:
+        rel = (cand.memory_id - lo) / (hi - lo)
+        return cand.final * (1.0 + weight * (rel - 0.5))
+
+    return sorted(group, key=adjusted, reverse=True)
+
+
 def assemble(
     settings: Settings,
     store: Store,
@@ -482,6 +607,13 @@ def assemble(
         if cand.memory_id in memories
     }
 
+    # Row ids run in message order within a session, so (id - lo) / (hi - lo) is
+    # the candidate's position in its own trajectory. One query, not one per
+    # session: this runs on every search.
+    spans = (
+        store.session_span(user_id, order) if settings.evidence_position_weight else {}
+    )
+
     budget = settings.evidence_budget_tokens
     used = 0
     items: list[EvidenceItem] = []
@@ -502,11 +634,20 @@ def assemble(
 
         group = groups[session_id]
         # Noise gate: stop rather than pad the answer model's prefix with
-        # same-repository distractors.
+        # same-repository distractors. Read on the group before any reordering,
+        # so the session's score stays its strongest chunk whatever slot order
+        # the intra-session levers choose below.
         if group[0].final < settings.min_evidence_score and len(
             items
         ) >= settings.min_evidence_count:
             break
+
+        if settings.evidence_position_weight:
+            span = spans.get(session_id)
+            if span is not None:
+                group = _position_ordered(
+                    group, span, settings.evidence_position_weight
+                )
 
         promote = settings.evidence_operative_promotion
         if promote < 0 or session_index < promote:

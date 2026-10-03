@@ -325,6 +325,52 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rerank-span-tokens", type=int, default=None,
                         help="select the cross-encoder document by query-term "
                              "density instead of taking a character prefix")
+    parser.add_argument("--rerank-top-n", type=int, default=None,
+                        help="how many fused candidates go through the "
+                             "cross-encoder (the latency knob)")
+    parser.add_argument("--rerank-max-length", type=int, default=None,
+                        help="pair cap the cross-encoder reads; a property of "
+                             "the checkpoint (MiniLM 512, bge-reranker-v2-m3 "
+                             "8194), not a tuning choice")
+    parser.add_argument("--rerank-doc-tokens", type=int, default=None,
+                        help="per-document token budget handed to the "
+                             "cross-encoder, clipped with its own tokenizer")
+    parser.add_argument("--dense-eligible", action="store_true",
+                        help="score a candidate that ONLY the dense channel "
+                             "found. Off by default, where dense can re-order "
+                             "what lexical/entity found but never recall "
+                             "anything of its own")
+    parser.add_argument("--dense-eligible-sim", type=float, default=None,
+                        help="absolute cosine floor for --dense-eligible "
+                             "(default 0.45); implies --dense-eligible")
+    parser.add_argument("--dense-eligible-max", type=int, default=None,
+                        help="cap on dense-only candidates admitted per query "
+                             "(0 = unlimited)")
+    parser.add_argument("--dense-fill", action="store_true",
+                        help="APPEND a few memories only dense reached, after "
+                             "assembly. Unlike --dense-eligible this never "
+                             "re-ranks or displaces anything the lexical "
+                             "channels produced")
+    parser.add_argument("--dense-fill-sim", type=float, default=None,
+                        help="absolute cosine floor for --dense-fill "
+                             "(default 0.50); implies --dense-fill")
+    parser.add_argument("--dense-fill-max", type=int, default=None,
+                        help="how many entries --dense-fill may append")
+    parser.add_argument("--max-sessions", type=int, default=None,
+                        help="override evidence_max_sessions (distinct sessions "
+                             "in the payload). Needed to tell apart 'the fill "
+                             "found new evidence' from 'the fill merely widened "
+                             "a session cap that was binding'")
+    parser.add_argument("--operative-weight", type=float, default=None,
+                        help="weight of the fifth ranking term, 'this chunk "
+                             "records an action' (0 = off, the default). Targets "
+                             "the measured failure where a read of a file "
+                             "outscores the edit that changed it")
+    parser.add_argument("--position-weight", type=float, default=None,
+                        help="override evidence_position_weight: intra-session "
+                             "tilt of slot choice toward the end of the "
+                             "trajectory. Cannot change which sessions are "
+                             "returned, so the session view is a no-op check")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -360,6 +406,34 @@ def main(argv: list[str] | None = None) -> int:
         overrides["rerank_probability_scores"] = True
     if args.rerank_span_tokens is not None:
         overrides["rerank_span_tokens"] = args.rerank_span_tokens
+    if args.rerank_top_n is not None:
+        overrides["rerank_top_n"] = args.rerank_top_n
+    if args.rerank_max_length is not None:
+        overrides["rerank_max_length"] = args.rerank_max_length
+    if args.rerank_doc_tokens is not None:
+        overrides["rerank_doc_tokens"] = args.rerank_doc_tokens
+    if args.dense_eligible:
+        overrides["dense_eligible"] = True
+    if args.dense_eligible_sim is not None:
+        # Passing a floor without the flag would silently do nothing.
+        overrides["dense_eligible"] = True
+        overrides["dense_eligible_min_similarity"] = args.dense_eligible_sim
+    if args.dense_eligible_max is not None:
+        overrides["dense_eligible_max"] = args.dense_eligible_max
+    if args.dense_fill:
+        overrides["dense_fill"] = True
+    if args.dense_fill_sim is not None:
+        overrides["dense_fill"] = True
+        overrides["dense_fill_min_similarity"] = args.dense_fill_sim
+    if args.dense_fill_max is not None:
+        overrides["dense_fill"] = True
+        overrides["dense_fill_max"] = args.dense_fill_max
+    if args.max_sessions is not None:
+        overrides["evidence_max_sessions"] = args.max_sessions
+    if args.operative_weight is not None:
+        overrides["operative_rank_weight"] = args.operative_weight
+    if args.position_weight is not None:
+        overrides["evidence_position_weight"] = args.position_weight
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

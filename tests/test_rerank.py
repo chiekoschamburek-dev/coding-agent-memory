@@ -188,6 +188,42 @@ def test_rerank_enabled_by_default():
     assert Settings().rerank_weight == 0.65
 
 
+def test_rerank_window_resolves_with_checkpoint():
+    """The window travels with the checkpoint, so leaving it unset must not
+    hand a long-context model the MiniLM-era 512/200 clipping.
+
+    Measured (equal-pool window experiment, eval/README.md): bge-reranker-v2-m3
+    at 512/200 scored decidable 0.400 — below the shipped MiniLM default —
+    because 76.7 % of Edit/Write/MultiEdit memories exceed 200 tokens and are
+    truncated exactly where the operative evidence sits; at 2048/800 it
+    reached 0.633. The family also emits 0..1 scores, which the sigmoid path
+    would flatten towards 0.5.
+    """
+    bge = Settings(rerank_model="BAAI/bge-reranker-v2-m3")
+    assert bge.rerank_max_length == 2048
+    assert bge.rerank_doc_tokens == 800
+    assert bge.rerank_probability_scores is True
+
+    unknown = Settings(rerank_model="cross-encoder/some-other-model")
+    assert unknown.rerank_max_length == 512
+    assert unknown.rerank_doc_tokens == 200
+    assert unknown.rerank_probability_scores is False
+
+
+def test_rerank_window_explicit_values_win():
+    """A deployment that pins the window for latency must get exactly what it
+    asked for, even on a checkpoint whose resolved default differs."""
+    pinned = Settings(
+        rerank_model="BAAI/bge-reranker-v2-m3",
+        rerank_max_length=512,
+        rerank_doc_tokens=200,
+        rerank_probability_scores=False,
+    )
+    assert pinned.rerank_max_length == 512
+    assert pinned.rerank_doc_tokens == 200
+    assert pinned.rerank_probability_scores is False
+
+
 def test_rerank_normalization_is_pool_independent(settings):
     """A memory's reranked contribution must not depend on how many other
     candidates were reranked alongside it.

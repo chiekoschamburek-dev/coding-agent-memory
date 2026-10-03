@@ -75,8 +75,16 @@ def _corpus(settings: Settings, n_distractors: int) -> Store:
 
 
 def _rank_of_relevant(items) -> str:
+    """Position of the first item from the relevant trajectory.
+
+    Matched on any of that session's own chunks rather than on one phrase: which
+    chunk of a session leads is the assembler's choice (``evidence_position_weight``
+    tilts it toward the code that was changed), and what this test exists to catch
+    is a *different* session displacing it.
+    """
+    markers = ("checkout", "joinedload", "session.query(Item)")
     for position, item in enumerate(items, start=1):
-        if "checkout" in item.content:
+        if any(marker in item.content for marker in markers):
             return str(position)
     return "-"
 
@@ -177,7 +185,12 @@ def test_operative_chunk_beats_its_own_siblings_for_a_slot(settings):
     keeps only the top three — which are reads. The word ``edit`` is in none of
     the queries, so term weighting cannot recover it either. Promotion of the
     operative chunk inside the top-ranked session is what puts it in the payload.
+
+    The intra-session position tilt reaches the same chunk by another route, so it
+    is pinned off here: this test is about promotion, and with the tilt on it would
+    pass for a reason it does not describe.
     """
+    settings.evidence_position_weight = 0.0
     store = Store(settings)
     try:
         add = AddPipeline(settings, store)
@@ -224,6 +237,124 @@ def test_operative_chunk_beats_its_own_siblings_for_a_slot(settings):
     assert all(a > b for a, b in zip(scores, scores[1:])), (
         "session-major ordering must still return strictly decreasing scores"
     )
+
+
+def test_position_tilt_delivers_the_edit_with_promotion_off(settings):
+    """The shipped intra-session lever, on its own.
+
+    `evidence_position_weight` defaults to 1.0 and is what currently carries the
+    edit into the payload when promotion is off, so this pins the behaviour the
+    service actually ships: a read-heavy session still returns the chunk that
+    records the change.
+    """
+    store = Store(settings)
+    try:
+        add = AddPipeline(settings, store)
+
+        def read(index: int) -> str:
+            return (
+                '[tool Read] {"file_path": "src/orders/checkout.py", "limit": 40}\n'
+                f"Inspecting checkout latency in src/orders/checkout.py, pass {index}: "
+                "the handler queries the order, then loops over items and loads each "
+                "one, so checkout in src/orders/checkout.py issues one query per order "
+                "item here."
+            )
+
+        edit = (
+            '[tool Edit] {"file_path": "src/orders/checkout.py", '
+            '"old_string": "for item in order.items:", '
+            '"new_string": "for item in order.items_loaded:"}\n'
+        )
+        add.handle(
+            request_id="work",
+            user_id="u1",
+            session_id="work",
+            messages=[_M(read(i)) for i in range(6)] + [_M(edit)],
+        )
+        search = SearchPipeline(settings, store)
+        settings.evidence_operative_promotion = 0
+        assert settings.evidence_position_weight, "the tilt is the shipped default"
+        items = search.handle(
+            user_id="u1",
+            query="Why was checkout slow in src/orders/checkout.py and what changed?",
+            options=None,
+            top_k=100,
+        )
+    finally:
+        store.close()
+
+    assert any("[tool Edit]" in i.content for i in items), (
+        "the intra-session tilt failed to deliver the operative chunk"
+    )
+    assert all(i.score <= 1.0 for i in items), (
+        "scores must stay on the 0..1 scale the noise gate is calibrated against"
+    )
+
+
+def test_operative_rank_term_stays_off_by_default(settings):
+    """The ranking-score form of the same signal was measured worse; keep it off.
+
+    On the proxy corpus it moved its own target the wrong way (the chunk carrying
+    a session's score named a task file 12.9% of the time at weight 0, 10.8% at
+    0.3), because distractor sessions are full of edits to *other* files. See
+    eval/README.md. What this test does hold is the scale contract: the term
+    rescales the other four rather than adding to them.
+    """
+    assert Settings().operative_rank_weight == 0.0
+    settings.operative_rank_weight = 0.3
+    store = Store(settings)
+    try:
+        add = AddPipeline(settings, store)
+        add.handle(
+            request_id="work",
+            user_id="u1",
+            session_id="work",
+            messages=[
+                _M(
+                    '[tool Edit] {"file_path": "src/orders/checkout.py"}\n'
+                    "checkout in src/orders/checkout.py loops over order items."
+                )
+            ],
+        )
+        items = SearchPipeline(settings, store).handle(
+            user_id="u1",
+            query="Why was checkout slow in src/orders/checkout.py?",
+            options=None,
+            top_k=100,
+        )
+    finally:
+        store.close()
+    assert all(0.0 < i.score <= 1.0 for i in items), (
+        "the term must keep the score on the 0..1 range the noise gate uses"
+    )
+
+
+def test_position_tilt_reorders_within_a_session_only():
+    """The intra-session position prior is bounded and cannot flip a clear win.
+
+    It exists because a trajectory reads a file before changing it, so among the
+    chunks of one session the later one is likelier to hold the edit. Two
+    properties have to hold: a chunk that scores clearly higher stays ahead (the
+    tilt is bounded by the weight), and it is applied inside a session group, so
+    it never gets to decide which session is returned.
+    """
+    from codemem.search.evidence import _position_ordered
+    from codemem.search.retriever import Candidate
+
+    def group(*pairs: tuple[int, float]) -> list[Candidate]:
+        return [Candidate(memory_id=m, final=f) for m, f in pairs]
+
+    span = (0, 100)
+    # 0.9 at position 10 beats 0.8 at position 90 once tilted: 0.9*0.76 < 0.8*1.24
+    tilted = _position_ordered(group((10, 0.9), (90, 0.8)), span, 0.6)
+    assert [c.memory_id for c in tilted] == [90, 10]
+    # Weight 0 is inert, so the shipped behaviour is unchanged by default.
+    assert [c.memory_id for c in _position_ordered(group((10, 0.9), (90, 0.8)), span, 0.0)] == [10, 90]
+    # A 2x score gap survives the maximum tilt the weight allows.
+    assert [c.memory_id for c in _position_ordered(group((10, 1.0), (99, 0.5)), span, 0.6)] == [10, 99]
+    # A session that is one memory long has no position to speak of.
+    single = group((7, 1.0))
+    assert _position_ordered(single, (7, 7), 0.6) == single
 
 
 def test_recency_alone_cannot_qualify_a_memory(settings):

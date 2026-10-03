@@ -39,6 +39,11 @@ class Reranker:
     device: str = "cpu"
     offline: bool = True
     max_length: int = 512
+    # Characters are a poor proxy for cost: measured on MiniLM, 2 048 characters
+    # can be 630 tokens while 40 characters is 21, and latency scales with real
+    # token count (4 ms/doc at 21 tokens, 48 ms/doc at 1 034). So the document is
+    # clipped with the model's own tokenizer, to this budget.
+    doc_token_budget: int = 200
     _model: object | None = None
     _failed: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -92,7 +97,18 @@ class Reranker:
                     self._model = CrossEncoder(self.model_name, device=self.device)
                 log.info(
                     "reranker ready",
-                    extra={"ctx": {"model": self.model_name, "device": self.device}},
+                    extra={
+                        "ctx": {
+                            "model": self.model_name,
+                            "device": self.device,
+                            # The window the stage will really read. A mismatch
+                            # between this and the model's capacity is invisible
+                            # in every metric (it shows up as "no change"), so it
+                            # has to be visible in the log.
+                            "pair_tokens": self.max_length,
+                            "doc_tokens": self.doc_token_budget,
+                        }
+                    },
                 )
                 return True
             except Exception as exc:
@@ -102,12 +118,6 @@ class Reranker:
                 )
                 self._failed = True
                 return False
-
-    # Characters are a poor proxy for cost: measured on this model, 2048
-    # characters can be 630 tokens while 40 characters is 21, and latency scales
-    # with real token count (4 ms/doc at 21 tokens, 48 ms/doc at 1034). So the
-    # document is clipped with the model's own tokenizer.
-    doc_token_budget: int = 200
 
     def _clip_many(self, documents: Sequence[str]) -> list[str]:
         """Clip many documents, tokenizing as a batch.
@@ -212,7 +222,13 @@ class RerankState:
         return cls._instance
 
     def get(self, settings: Settings) -> Reranker:
-        key = (settings.rerank_model, settings.rerank_device, settings.embed_offline)
+        key = (
+            settings.rerank_model,
+            settings.rerank_device,
+            settings.embed_offline,
+            settings.rerank_max_length,
+            settings.rerank_doc_tokens,
+        )
         with self._lock:
             reranker = self._cache.get(key)
             if reranker is None:
@@ -220,6 +236,8 @@ class RerankState:
                     model_name=settings.rerank_model,
                     device=settings.rerank_device,
                     offline=settings.embed_offline,
+                    max_length=settings.rerank_max_length,
+                    doc_token_budget=settings.rerank_doc_tokens,
                 )
                 self._cache[key] = reranker
             return reranker

@@ -12,8 +12,16 @@ import time
 
 from ..core.config import Settings
 from ..core.logging import get_logger
+from ..core.tokens import count_tokens
 from ..index.store import MemoryRow, Store
-from .evidence import EvidenceItem, _select_span, assemble, score_candidates
+from .evidence import (
+    INFORMATIVE_CHANNELS,
+    EvidenceItem,
+    _iso_from_ms,
+    _select_span,
+    assemble,
+    score_candidates,
+)
 from .query import plan_query
 from .retriever import Retriever
 
@@ -65,7 +73,19 @@ class SearchPipeline:
                 if score > 0:
                     entity_match_by_memory[memory.id] = score
 
-        scored = score_candidates(candidates, memories, plan, entity_match_by_memory)
+        scored = score_candidates(
+            candidates,
+            memories,
+            plan,
+            entity_match_by_memory,
+            dense_only_min_similarity=(
+                self.settings.dense_eligible_min_similarity
+                if self.settings.dense_eligible
+                else None
+            ),
+            dense_only_max=self.settings.dense_eligible_max,
+            operative_weight=self.settings.operative_rank_weight,
+        )
 
         # Rerank the head of the fused list by reading each (question, memory)
         # pair jointly. Only the top slice is reranked: a cross-encoder is
@@ -89,6 +109,7 @@ class SearchPipeline:
             memories,
             top_k=limit,
         )
+        items = self._dense_fill(user_id, plan, candidates, memories, items)
 
         log.info(
             "search done",
@@ -105,6 +126,97 @@ class SearchPipeline:
             },
         )
         return items
+
+    def _dense_fill(
+        self,
+        user_id: str,
+        plan: QueryPlan,
+        candidates: list[Candidate],
+        memories: dict[int, MemoryRow],
+        items: list[EvidenceItem],
+    ) -> list[EvidenceItem]:
+        """Append a few memories that only the dense channel reached.
+
+        The append-only form of dense-only admission, deliberately weaker than
+        scoring them normally: nothing the lexical channels produced is revisited.
+        Their order, their scores and the session slots they occupy all stay
+        exactly as ``assemble`` decided.
+
+        Three exclusions define what may be appended:
+
+        * not already returned;
+        * not from a session already represented — a second chunk of a session
+          already shown costs tokens without adding a new lead;
+        * not contested by ``lexical`` or ``entity``. That last one is what makes
+        this a *fill* for the lexical channels' blind spot rather than a second
+        chance for something they already ranked and left behind.
+
+        It never fires on an empty result: the noise gate having abstained is a
+        decision about the query, and appending to ``[]`` would undo it.
+
+        Scores continue strictly decreasing from the tail, since emission order
+        is the relevance order we assert.
+        """
+        settings = self.settings
+        if not settings.dense_fill or not items or settings.dense_fill_max <= 0:
+            return items
+
+        floor = settings.dense_fill_min_similarity
+        used_memory = {item.memory_id for item in items}
+        used_session: set[str] = set()
+        for item in items:
+            memory = memories.get(item.memory_id)
+            if memory is not None and memory.session_id:
+                used_session.add(memory.session_id)
+
+        fillable = [
+            cand
+            for cand in candidates
+            if cand.memory_id not in used_memory
+            and not any(name in cand.channels for name in INFORMATIVE_CHANNELS)
+            and cand.channel_scores.get("dense", 0.0) >= floor
+        ]
+        fillable.sort(key=lambda c: (-c.channel_scores.get("dense", 0.0), c.memory_id))
+
+        out = list(items)
+        tail = out[-1].score if out else 0.0
+        for cand in fillable:
+            if len(out) - len(items) >= settings.dense_fill_max:
+                break
+            memory = memories.get(cand.memory_id)
+            if memory is None or memory.session_id in used_session:
+                continue
+            content, truncated = _select_span(
+                memory.text,
+                settings.dense_fill_tokens,
+                plan.keywords,
+                settings.evidence_operative_weight,
+            )
+            if not content:
+                continue
+            # Stay below the last emitted score by more than the 6-decimal
+            # rounding can absorb, or two neighbours collapse to one value.
+            # Stop rather than emit a duplicate at the floor: `assemble` clamps
+            # to 1e-6, so a long tail can leave no room left to decrease into.
+            nxt = tail - 1e-5
+            if nxt < 1e-6:
+                break
+            tail = nxt
+            out.append(
+                EvidenceItem(
+                    memory_id=memory.id,
+                    content=content,
+                    score=round(tail, 6),
+                    created_at=_iso_from_ms(memory.ts) or memory.created_at,
+                    tokens=count_tokens(content),
+                    truncated=truncated,
+                    superseded=memory.superseded_by is not None,
+                )
+            )
+            used_memory.add(memory.id)
+            if memory.session_id:
+                used_session.add(memory.session_id)
+        return out
 
     def _rerank_body(self, memory: MemoryRow, plan: QueryPlan) -> str:
         """The text the cross-encoder reads for one memory.

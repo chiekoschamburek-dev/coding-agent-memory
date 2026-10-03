@@ -553,6 +553,33 @@ class Store:
             ).fetchall()
         return {int(row["id"]): row["session_id"] for row in rows}
 
+    def session_span(
+        self, user_id: str, session_ids: Sequence[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Lowest and highest memory row id per session.
+
+        Row ids are assigned in insertion order, which for a trajectory is the
+        order the platform sent the messages in - including across several Add
+        calls for one session, where ``ord`` restarts per request. Assembly uses
+        it to place a candidate inside its own session (0 = first message,
+        1 = last), which is the only position scale that means the same thing for
+        a 20-turn and a 300-turn trajectory.
+        """
+        ids = [s for s in session_ids if s]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT session_id, min(id) AS lo, max(id) AS hi FROM memory"
+                f" WHERE user_id = ? AND session_id IN ({placeholders})"
+                " GROUP BY session_id",
+                (user_id, *ids),
+            ).fetchall()
+        return {
+            row["session_id"]: (int(row["lo"]), int(row["hi"])) for row in rows
+        }
+
     def fetch_memories(self, user_id: str, memory_ids: Sequence[int]) -> dict[int, MemoryRow]:
         if not memory_ids:
             return {}

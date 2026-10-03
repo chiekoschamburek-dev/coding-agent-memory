@@ -105,6 +105,31 @@ def modified_basenames(blob: str) -> set[str]:
     return out
 
 
+_WS = re.compile(r"\s+")
+
+
+def _claim_view(text: str) -> str:
+    """Collapse whitespace and drop our own gap markers before comparing.
+
+    ``_select_span`` can emit "…" where it skipped lines. The claim is stored
+    verbatim, so the only difference that should matter is whether the words are
+    there in sequence.
+    """
+    return _WS.sub(" ", text.replace("…", " ")).strip().lower()
+
+
+def claim_delivered(blob: str, claim: str) -> bool:
+    """True when the returned content carries the claim *whole*.
+
+    Whole, not in part: an explanation that arrives truncated is not the
+    explanation. This is the property the file-name marker test cannot see, since
+    ``file_path`` sits at the head of every tool-call record and survives any
+    window that reaches the line at all.
+    """
+    needle = _claim_view(claim)
+    return bool(needle) and needle in _claim_view(blob)
+
+
 def _prefix_view(contents: list[str], costs: list[int], budget: int) -> tuple[str, int, int]:
     """The content the answer model actually receives: a token-counted prefix.
 
@@ -161,6 +186,7 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
     app = create_app(settings)
 
     rows: list[dict] = []
+    kinds: set[str] = set()
     with TestClient(app) as client:
         for memory in bench["memories"]:
             client.post(
@@ -194,19 +220,38 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
             contents = [item["content"] for item in data]
             costs = [count_tokens(content) for content in contents]
 
-            gold = _basename(question["gold_file"])
-            distractors = [
-                _basename(option)
-                for i, option in enumerate(question["options"])
-                if i != question["gold_index"]
-            ]
+            claim = question.get("gold_claim")
+            if claim:
+                # Claim-type item: the answer is a recorded explanation, so the
+                # question is whether it arrives whole, not whether a file name
+                # appears. Rows from the two types are not comparable.
+                foils = [
+                    option
+                    for i, option in enumerate(question["options"])
+                    if i != question["gold_index"]
+                ]
+                kinds.add("claim")
 
-            def judge(blob: str) -> tuple[bool, bool]:
-                modified = modified_basenames(blob)
-                return (
-                    gold in modified,
-                    any(distractor in modified for distractor in distractors),
-                )
+                def judge(blob: str, _c: str = claim, _f: list[str] = foils) -> tuple[bool, bool]:
+                    return (
+                        claim_delivered(blob, _c),
+                        any(claim_delivered(blob, foil) for foil in _f),
+                    )
+            else:
+                kinds.add("file-marker")
+                gold = _basename(question["gold_file"])
+                distractors = [
+                    _basename(option)
+                    for i, option in enumerate(question["options"])
+                    if i != question["gold_index"]
+                ]
+
+                def judge(blob: str) -> tuple[bool, bool]:
+                    modified = modified_basenames(blob)
+                    return (
+                        gold in modified,
+                        any(distractor in modified for distractor in distractors),
+                    )
 
             decisive, distractor_hit = judge("\n\n".join(contents))
             shown_sessions = {session_of.get(item["id"]) for item in data}
@@ -277,6 +322,7 @@ def run(questions_path: Path, benchmark_path: Path, *, top_k: int, limit: int | 
         "prefix": prefix_summary,
         "rows": rows,
         "settings": settings_overrides,
+        "judge_kinds": sorted(kinds),
     }
 
 
@@ -286,6 +332,8 @@ def report(result: dict) -> None:
     print("Evidence sufficiency (deterministic; no model in the loop)")
     print("=" * 68)
     print(f"questions                : {result['n']}")
+    print(f"judge                    : {'+'.join(result.get('judge_kinds') or ['?'])}"
+          "   (file-marker = a file name appears; claim = an explanation arrives whole)")
     print(f"answer session retrieved : {result['session_retrieved_rate']:.3f}")
     print(f"mean items returned      : {result['mean_returned']:.1f}")
     print(f"mean sessions returned   : {result['mean_sessions']:.1f}")
@@ -333,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-sessions", type=int, default=None)
     parser.add_argument("--operative-promotion", type=int, default=None,
                         help="override evidence_operative_promotion (-1=all, 0=never, N=top N)")
+    parser.add_argument("--position-weight", type=float, default=None,
+                        help="override evidence_position_weight: tilt which chunk "
+                             "of an already-chosen session takes a slot toward the "
+                             "end of that trajectory (0 = off)")
     parser.add_argument("--cap", type=int, default=None,
                         help="override max_evidence_per_session")
     parser.add_argument(
@@ -371,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_operative_weight"] = args.operative_weight
     if args.operative_promotion is not None:
         overrides["evidence_operative_promotion"] = args.operative_promotion
+    if args.position_weight is not None:
+        overrides["evidence_position_weight"] = args.position_weight
     if args.max_sessions is not None:
         overrides["evidence_max_sessions"] = args.max_sessions
     if args.cap is not None:
