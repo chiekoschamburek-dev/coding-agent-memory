@@ -371,6 +371,11 @@ def main(argv: list[str] | None = None) -> int:
                              "tilt of slot choice toward the end of the "
                              "trajectory. Cannot change which sessions are "
                              "returned, so the session view is a no-op check")
+    parser.add_argument("--cards", action="store_true",
+                        help="enable L3 experience cards: one generated "
+                             "overview per session, scored but never emitted. "
+                             "Requires CODEMEM_LLM_BASE_URL / _API_KEY / "
+                             "_MODEL and spends one LLM call per Add")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -382,6 +387,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     overrides: dict = {}
+    if args.cards:
+        # Cards need the relay credentials, which live in .env; the benchmark
+        # otherwise builds Settings directly and never reads the environment.
+        import os
+
+        env_file = Path(".env")
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+        for env_name, field in (
+            ("CODEMEM_LLM_BASE_URL", "llm_base_url"),
+            ("CODEMEM_LLM_API_KEY", "llm_api_key"),
+            ("CODEMEM_LLM_MODEL", "llm_model"),
+        ):
+            value = os.environ.get(env_name)
+            if value:
+                overrides[field] = value
     if args.noise_gate is not None:
         overrides["min_evidence_score"] = args.noise_gate
     if args.budget_tokens is not None:
@@ -434,6 +459,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["operative_rank_weight"] = args.operative_weight
     if args.position_weight is not None:
         overrides["evidence_position_weight"] = args.position_weight
+    if args.cards:
+        overrides["card_enabled"] = True
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

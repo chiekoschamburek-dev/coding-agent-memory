@@ -338,6 +338,45 @@ class Store:
         )
         return AddOutcome(written, len(chunks), duplicate=False)
 
+    def add_card(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        ts: int | None,
+        ord: int,
+        entities: Sequence[tuple[str, str, str]] = (),
+    ) -> int | None:
+        """Persist one experience card (L3 enrichment) outside the Add transaction.
+
+        The card is a memory row with ``kind='card'`` and no ``chunk_id``: its
+        ``text`` is the generated overview, which FTS and the dense channel
+        index like any memory. Identity is the content hash, so a re-Add of the
+        same session (same overview) deduplicates through
+        ``UNIQUE (user_id, sha)`` and never pays for the row twice. Returns the
+        new memory id, or ``None`` when the row already existed.
+
+        Called from the enrichment pass, which never raises into Add: a failure
+        here only means the session has no card and Search runs chunk-only.
+        """
+        now = utc_now_iso()
+        with self._write() as conn:
+            return self._insert_memory(
+                conn,
+                user_id=user_id,
+                session_id=session_id,
+                request_id=f"card:{sha256_text(text)[:16]}",
+                chunk_id=None,
+                kind="card",
+                title="card|",
+                text=text,
+                ts=ts,
+                ord=ord,
+                now=now,
+                entities=entities,
+            )
+
     def _insert_memory(
         self,
         conn: sqlite3.Connection,

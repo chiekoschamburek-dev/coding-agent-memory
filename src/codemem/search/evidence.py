@@ -659,6 +659,15 @@ def assemble(
                 break
 
             memory = memories[cand.memory_id]
+            # Card invariant 1: a card is a ranking object, never a returned
+            # one. Its score has already carried its session's rank (the
+            # session head may well be the card); the slots it would take are
+            # filled by the session's chunks instead. A session whose members
+            # are all cards therefore emits nothing — a card qualifies
+            # nothing — because `taken` stays 0 and `sessions_used` is not
+            # incremented.
+            if memory.kind == "card":
+                continue
             body_source = source_of[cand.memory_id]
             full_form = len(items) < settings.evidence_full_count
             budget_for_item = (

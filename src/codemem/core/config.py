@@ -254,6 +254,20 @@ class Settings:
     llm_timeout_seconds: float = 60.0
     enrich_ratio: float = 0.25  # fraction of chunks eligible for enrichment
 
+    # ---- experience cards (L3 enrichment) --------------------------------
+    # One generated summary per session, written to the memory table with
+    # kind='card' during the enrichment pass. The card competes in recall and
+    # scoring like any memory row — the cross-encoder reads (query, overview)
+    # as a session-level pair, which is the comparable object session ranking
+    # otherwise lacks — but it is never emitted: data[].content is always a
+    # verbatim chunk span, and a session whose only members are cards emits
+    # nothing. Requires the LLM; a failure degrades Add but never fails it.
+    card_enabled: bool = False
+    # How much of the session's raw text the overview prompt may read.
+    card_max_input_chars: int = 8000
+    # Output budget for the overview itself.
+    card_max_output_tokens: int = 400
+
     # ---- dense retrieval ------------------------------------------------
     # On by default. The cost/benefit was measured on both devices and it flips
     # with hardware, so the earlier CPU-only "not worth it" conclusion does not
@@ -503,6 +517,7 @@ class Settings:
             _env_int("CODEMEM_LISTWISE_EXCERPT_CHARS", 1800),
         )
         put("llm_enabled", _env_bool("CODEMEM_LLM_ENABLED", False))
+        put("card_enabled", _env_bool("CODEMEM_CARDS", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))
         put("llm_model", _env_str("CODEMEM_LLM_MODEL", "gpt-4o-mini"))

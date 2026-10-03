@@ -381,6 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-sessions", type=int, default=None)
     parser.add_argument("--operative-promotion", type=int, default=None,
                         help="override evidence_operative_promotion (-1=all, 0=never, N=top N)")
+    parser.add_argument("--cards", action="store_true",
+                        help="enable L3 experience cards (one overview per "
+                             "session, scored but never emitted)")
     parser.add_argument("--position-weight", type=float, default=None,
                         help="override evidence_position_weight: tilt which chunk "
                              "of an already-chosen session takes a slot toward the "
@@ -425,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_operative_promotion"] = args.operative_promotion
     if args.position_weight is not None:
         overrides["evidence_position_weight"] = args.position_weight
+    if args.cards:
+        overrides["card_enabled"] = True
     if args.max_sessions is not None:
         overrides["evidence_max_sessions"] = args.max_sessions
     if args.cap is not None:

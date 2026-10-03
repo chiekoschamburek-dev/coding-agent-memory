@@ -184,7 +184,14 @@ class SearchPipeline:
             if len(out) - len(items) >= settings.dense_fill_max:
                 break
             memory = memories.get(cand.memory_id)
-            if memory is None or memory.session_id in used_session:
+            # A card never reaches the payload through any path: its text is
+            # generated, and data[].content must stay a verbatim span of Add
+            # input (docs/DESIGN.md, card invariant 1).
+            if (
+                memory is None
+                or memory.kind == "card"
+                or memory.session_id in used_session
+            ):
                 continue
             content, truncated = _select_span(
                 memory.text,

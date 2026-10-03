@@ -21,7 +21,7 @@ from typing import Any
 from ..core.config import Settings
 from ..core.errors import PayloadTooLarge
 from ..core.logging import get_logger
-from ..index.store import AddOutcome, Store, sha256_text
+from ..index.store import AddOutcome, Store, sha256_text, utc_now_iso
 from .chunker import chunk_content
 from .entities import extract_entities
 
@@ -88,7 +88,7 @@ class AddPipeline:
             self._embed(user_id, request_id, plan, t0)
 
         degraded = True
-        if self.settings.llm_enabled:
+        if self.settings.card_enabled or self.settings.llm_enabled:
             degraded = not self._enrich(user_id, session_id, plan, t0)
         return outcome, degraded
 
@@ -183,31 +183,166 @@ class AddPipeline:
 
     # ---------------------------------------------------------- enrichment --
 
+    _CARD_SYSTEM = (
+        "You summarize software-engineering sessions for a retrieval index. "
+        "Write concrete, factual prose; never invent files, commands, or outcomes "
+        "that the transcript does not show."
+    )
+
+    _CARD_PROMPT = """Below is one recorded engineering session (user and assistant turns).
+
+Transcript:
+{transcript}
+
+Summarize what this session did in at most 120 words: the problem being solved,
+the approach taken, what was changed (concrete file paths and identifiers where
+the transcript shows them), and the outcome. Output only the summary text."""
+
     def _enrich(
         self, user_id: str, session_id: str, plan: AddPlan, t0: float
     ) -> bool:
-        """L3 enrichment hook (experience cards / episode summary).
+        """L3 enrichment: one experience card per session.
 
-        P1 ships without LLM enrichment. When enabled, this pass must:
-          * select only chunks likely to carry reusable experience;
-          * cache by content hash so retries never pay twice;
-          * respect the internal deadline and return False on any failure.
+        The card is a session-level comparable object for ranking — the
+        cross-encoder reads (query, overview) as one pair, which no single
+        chunk of a ~100-chunk session can stand in for (the session head is
+        the decisive entry only 12.9 % of the time). It is also a recall
+        candidate: a session whose chunks share vocabulary with each other but
+        not with the query can still be surfaced through its overview.
 
-        It never raises, so Add cannot be failed by enrichment.
+        Invariants (docs/DESIGN.md): the card never carries returned text —
+        Search may score it but the assembler never emits it; identity and
+        content are pure functions of Add input (the overview is cached by the
+        prompt's content hash, so a re-Add reproduces the same row); and a
+        failure here degrades Add instead of failing it.
         """
+        if not self.settings.card_enabled:
+            # No card work requested; nothing was skipped, so not degraded.
+            return self.settings.llm_enabled
+
         deadline = t0 + self.settings.add_deadline_seconds
         try:
-            if time.monotonic() >= deadline:
-                log.warning(
-                    "enrichment skipped: deadline reached",
-                    extra={"ctx": {"user_id": user_id, "session_id": session_id}},
-                )
+            overview = self._session_overview(plan, deadline)
+            if not overview:
                 return False
-            # Placeholder for P3: card extraction runs here.
+
+            ts_values = [m["ts"] for m in plan.messages if m.get("ts") is not None]
+            ts = min(ts_values) if ts_values else None
+            ord_value = (plan.chunks[-1]["ord"] + 1) if plan.chunks else 0
+            found = extract_entities(overview)
+            entities = [(e.etype, e.value_norm, e.value_raw) for e in found]
+
+            memory_id = self.store.add_card(
+                user_id=user_id,
+                session_id=session_id,
+                text=overview,
+                ts=ts,
+                ord=ord_value,
+                entities=entities,
+            )
+            if memory_id is None:
+                return True  # already stored by a previous identical Add
+
+            self._embed_card(user_id, memory_id, overview)
+            log.info(
+                "card written",
+                extra={"ctx": {"user_id": user_id, "session_id": session_id,
+                               "memory_id": memory_id, "chars": len(overview)}},
+            )
             return True
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
                 "enrichment failed; raw memory retained",
-                extra={"ctx": {"user_id": user_id, "error": str(exc)}},
+                extra={"ctx": {"user_id": user_id, "session_id": session_id,
+                               "error": str(exc)[:200]}},
             )
             return False
+
+    def _session_overview(self, plan: AddPlan, deadline: float) -> str | None:
+        """The session's overview text, from cache or the LLM. Never raises."""
+        budget = self.settings.card_max_input_chars
+        turns = [
+            f"[{m['role']}] {m['content']}" for m in plan.messages
+        ]
+        transcript = "\n\n".join(turns)
+        if len(transcript) > budget:
+            # Trajectories read before they change: keep the issue statement
+            # from the head and the edits from the tail, drop the middle.
+            head = budget // 2
+            transcript = transcript[:head] + "\n\n[...]\n\n" + transcript[-head:]
+
+        cache_key = sha256_text(self._CARD_PROMPT.format(transcript=transcript))
+        with self.store._read() as conn:  # noqa: SLF001 - same package
+            row = conn.execute(
+                "SELECT payload FROM llm_cache WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        if row is not None:
+            return row["payload"]
+
+        if time.monotonic() >= deadline:
+            log.warning("enrichment skipped: deadline reached")
+            return None
+
+        overview = self._llm_complete(
+            self._CARD_SYSTEM,
+            self._CARD_PROMPT.format(transcript=transcript),
+        )
+        if not overview:
+            return None
+        overview = overview.strip()
+        if not overview:
+            return None
+        with self.store._write() as conn:  # noqa: SLF001 - same package
+            conn.execute(
+                "INSERT OR REPLACE INTO llm_cache(cache_key, kind, payload, created_at)"
+                " VALUES (?,?,?,?)",
+                (cache_key, "card", overview, utc_now_iso()),
+            )
+        return overview
+
+    def _llm_complete(self, system: str, user: str) -> str | None:
+        """One chat completion against the configured relay. Never raises."""
+        base_url = self.settings.llm_base_url
+        api_key = self.settings.llm_api_key
+        if not base_url or not api_key:
+            log.warning("card skipped: LLM not configured")
+            return None
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                timeout=self.settings.llm_timeout_seconds,
+            )
+            response = client.chat.completions.create(
+                model=self.settings.llm_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0,
+                max_tokens=self.settings.card_max_output_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "card LLM call failed",
+                extra={"ctx": {"error": str(exc)[:200]}},
+            )
+            return None
+
+    def _embed_card(self, user_id: str, memory_id: int, overview: str) -> None:
+        """Give the card a dense vector so the paraphrase channel reaches it."""
+        instance = self.embedder
+        if instance is None or not instance.available:
+            return
+        try:
+            vectors = instance.embed([overview])
+            if vectors:
+                self.store.store_vectors(user_id, [(memory_id, vectors[0])])
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "card embedding skipped",
+                extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
