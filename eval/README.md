@@ -1257,6 +1257,41 @@ small (+0.034 shipped, +0.069 gated); on this question type, controlling
 noise is worth more than adding reach — which is the whole thesis of the
 small payload, now measured against a significant reference point.
 
+### The session-score estimator: top-k mass, the first ranking lever that works (2026-10-04)
+
+`session_score_topk`. The session's score was the **max** over its admitted
+members — the estimator the attribution work called wrong (a session's head
+chunk names the task file only 12.9 % of the time). `session_score_topk=k`
+replaces it with the sum of the top-k member scores; the noise gate keeps
+reading the head. Three instantiations of "rank sessions directly" had
+already failed (session-representative rerank MRR −0.059 p=0.006, listwise
+judge below baseline, cards gated out) — all of them replaced the
+*representative object*; this one only fixes the *aggregator*, and it is the
+first session-ranking change with a significant win:
+
+| metric (proxy, 89 q, paired) | max (shipped) | top-2 | top-3 |
+|---|---|---|---|
+| session recall@10 | 0.4746 | **0.4935** (p=0.004) | 0.5004 (p=0.045) |
+| session nDCG@10 | 0.5230 | **0.5429** (p=0.005) | 0.5470 (p=0.044) |
+| entry recall@10 | 0.4746 | **0.4935** (p=0.004) | 0.5004 (p=0.045) |
+| entry nDCG@10 | 0.4845 | 0.4997 (p=0.011) | 0.5042 (p=0.081) |
+| session MRR | 0.7584 | 0.7809 (p=0.13) | 0.7865 (p=0.16) |
+| entry precision@10 | 0.5361 | 0.5587 (p=0.076) | 0.5490 (p=0.45) |
+| payload entries | 9.25 | 9.66 | 9.78 |
+
+**Top-2 is the better arm**: the recall/nDCG gains are significant, precision
+does not degrade, and the payload grows by 0.4 entries (top-3 buys +0.3pp
+recall for +0.11 more entries with visibly weaker precision confidence).
+Evidence metric at top-2 (30 q): decidable unchanged (0.567), decisive
+0.767 → 0.800, payload −16 % (2 408 → 2 014 tokens) — no downside measured.
+The procedure e2e verification of top-2 is **pending infrastructure**: two
+attempts were invalidated because the answer relay began rejecting large
+requests (`insufficient_user_quota` — the account balance no longer covers
+the per-call pre-charge of a several-thousand-token prompt; small probes
+pass, full-context calls fail with 403). The proxy and evidence numbers
+above are relay-free and stand; the e2e re-run is one command once the
+account is topped up.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

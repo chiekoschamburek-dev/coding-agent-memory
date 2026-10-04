@@ -610,6 +610,22 @@ def assemble(
     # Row ids run in message order within a session, so (id - lo) / (hi - lo) is
     # the candidate's position in its own trajectory. One query, not one per
     # session: this runs on every search.
+    #
+    # Session score. The shipped estimator is the max over the session's
+    # admitted members (the head). ``session_score_topk`` > 1 replaces it with
+    # the sum of the top-k member scores — a session with several moderately
+    # matching chunks should outrank one with a single lucky high scorer,
+    # which is the failure the attribution work measured (the session head
+    # names the task file only 12.9 % of the time). The noise gate still reads
+    # the head: "the session's best evidence" stays its best chunk's score.
+    if settings.session_score_topk > 1:
+        k = settings.session_score_topk
+        masses: dict[str, float] = {}
+        for sid, members in groups.items():
+            finals = sorted((c.final for c in members), reverse=True)[:k]
+            masses[sid] = sum(finals)
+        order.sort(key=lambda sid: -masses.get(sid, 0.0))
+
     spans = (
         store.session_span(user_id, order) if settings.evidence_position_weight else {}
     )

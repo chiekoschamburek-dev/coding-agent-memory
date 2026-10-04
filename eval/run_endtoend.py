@@ -446,6 +446,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="enable L3 experience cards (one overview per "
                              "session, scored but never emitted); spends one "
                              "LLM call per Add")
+    parser.add_argument("--session-score-topk", type=int, default=None,
+                        help="session score = sum of the top-k member scores "
+                             "instead of the max (1 = shipped max estimator)")
     parser.add_argument("--card-expansion", action="store_true",
                         help="relax card invariant 5: a gated card may vouch "
                              "its session's verbatim tail chunks into the "
@@ -503,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["card_enabled"] = True
     if args.card_expansion:
         overrides["card_expansion"] = True
+    if getattr(args, "session_score_topk", None) is not None:
+        overrides["session_score_topk"] = args.session_score_topk
     if args.dense_enabled is not None:
         overrides["dense_enabled"] = args.dense_enabled.lower() == "true"
     if args.rerank_enabled is not None:

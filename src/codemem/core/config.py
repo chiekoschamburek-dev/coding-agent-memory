@@ -135,6 +135,11 @@ class Settings:
     # chunk often sits deep inside a read-heavy trajectory and the previous
     # cap of 3 frequently truncated before reaching it.
     max_evidence_per_session: int = 5
+    # Session score estimator. 1 (shipped) = the max over the session's
+    # admitted members; k > 1 = the sum of the top-k member scores, so a
+    # session with several moderately matching chunks can outrank one with a
+    # single lucky high scorer. The noise gate keeps reading the head.
+    session_score_topk: int = 1
     # Cap on distinct sessions in one payload. 0 means unlimited, which was the
     # earlier default. Tightening it to 2 is the companion move to the cap
     # increase above: with fewer sessions competing for the token prefix,
@@ -527,6 +532,7 @@ class Settings:
         )
         put("llm_enabled", _env_bool("CODEMEM_LLM_ENABLED", False))
         put("card_enabled", _env_bool("CODEMEM_CARDS", False))
+        put("session_score_topk", _env_int("CODEMEM_SESSION_SCORE_TOPK", 1))
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))
