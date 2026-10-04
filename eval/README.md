@@ -765,6 +765,68 @@ reproduced to the question — 0 discordant pairs out of 58 (p=1.0) — with
 reach 48.3 % (was 46.6 %), 96.6 % unanimous, zero relay failures. The
 deployment default stands as frozen.
 
+### Post-campaign algorithm sweep: three candidates, three clean kills (2026-10-05)
+
+`scripts/menu_dump.py` — one Add pass plus one embed pass, validated 58/58
+**bitwise** against the archived miss diagnosis (shortlist, shipped payload,
+fusion payload) — captures everything the post-campaign candidates needed:
+the deep order (top-24), per-session file manifests, first messages,
+top chunks **by final score**, cause-prose sentences, timestamps. Every
+analysis below iterates on that dump; nothing re-Adds.
+
+**Shortlist diversification is dead, and the death falsifies the
+mechanism.** The hypothesis: the 20 shortlist-bottleneck misses happen
+because same-file distractors crowd the menu as near-duplicates of one
+another, so a coverage-greedy menu (skip a session whose file manifest
+nearly duplicates a seated one) should reclaim seats for the answer
+session. Measured over all 58 questions (`scripts/menu_analysis.py`,
+gains AND losses, per the non-monotonicity discipline):
+
+| menu rule | gain | loss | net | bottleneck seated |
+|---|---|---|---|---|
+| jaccard ≥ 0.2 | 2 | 4 | −2 | 2/20 |
+| jaccard ≥ 0.3 | 2 | 3 | −1 | 2/20 |
+| jaccard ≥ 0.4 | 2 | 2 | 0 | 2/20 |
+| jaccard ≥ 0.5 | 2 | 1 | +1 | 2/20 |
+| cap-2-per-cluster @0.3 | 0 | 1 | −1 | 0/20 |
+| fused12 order as menu | 3 | 10 | −7 | 3/20 |
+
+The distractors are **not** near-duplicates of each other — they touch
+overlapping but distinct file sets, below every Jaccard threshold that
+would reclaim seats. The menu is crowded by score, not by redundancy, so
+there is nothing to diversify into. Killed before a line of product code.
+
+**The corrected F3: the conclusion stands, the recorded reason was wrong.**
+`session_features.py`'s CAUSE regex ends in a literal double backslash
+(`\\b` as text, not a word boundary) — it never matched ordinary prose, so
+the archived "exactly 0.4746, signal too sparse" verdict measured a
+constant-zero feature. With the repaired (and wider) lexicon from
+`build_qa_procedure.py`, F3 fires on 4% of session rows — the signal
+exists — but adds nothing: payload reach fused12 22/58 vs fused123c 21/58
+(+1/−2), F3 alone 14/58 below shipped 18/58. Cause-prose coverage is not
+a session-ranking signal in this corpus; both the verdict and its reason
+are now recorded correctly.
+
+**Digest composition is not a lever; the judgment bucket is mostly relay
+jitter.** The shipped digest's "top chunks" are the two LONGEST pooled
+texts (a placeholder in `service.py`). `scripts/digest_replay.py` re-ran
+the selection call on the 11 recorded judgment misses under three digests
+— V0 shipped, V1 chunks-by-score, V2 scored chunks + recorded-cause
+sentences + dates + last line + plan identifiers in the prompt — paired
+within query, same 8 sessions, temperature 0, plus 4 reached queries as
+controls. **All three variants produce identical picks on every query**
+(3/11 misses hit, 4/4 controls kept): the model's choice tracks the
+opening/files fields, not the chunk evidence. The load-bearing number is
+the V0 control itself: **8 of the 11 recorded misses flip on a single
+re-call** with the same digest and temperature 0. Those queries sit on the
+decision boundary; the recorded majority-of-5 landed on the wrong side.
+Consequences: (a) the parked card's "11 digest-quality misses" target
+shrinks to ~3 hard queries; (b) a new candidate emerged — **selection
+self-consistency** (`CODEMEM_SESSION_SELECT_VOTES`, implemented,
+default 1 = one-shot byte-for-byte, guard-tested): sample the relay's
+cross-request variance N times and take the mode. Judged on the new
+instrument below, never on the frozen one.
+
 **How the answer model locates the file without memory.** Measured, not assumed,
 because the initial explanation ("it knows the repository") turned out to be only
 half right:

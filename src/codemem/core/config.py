@@ -166,6 +166,14 @@ class Settings:
     # Search latency sane. Quantify the fallback rate during the deployment
     # soak and re-tune there.
     session_select_timeout_seconds: float = 10.0
+    # Selection self-consistency: how many times the selection call runs,
+    # majority-voting the session picks. The digest replay measured that 8 of
+    # the 11 recorded judgment misses flip on a single re-call at
+    # temperature 0 -- those queries sit on the decision boundary and the
+    # one-shot pick samples the relay's cross-request variance. Votes > 1
+    # samples that distribution and takes its mode. 1 = the shipped
+    # one-shot behaviour, byte-for-byte.
+    session_select_votes: int = 1
     # Cap on distinct sessions in one payload. 0 means unlimited, which was the
     # earlier default. Tightening it to 2 is the companion move to the cap
     # increase above: with fewer sessions competing for the token prefix,
@@ -565,6 +573,7 @@ class Settings:
             "session_select_timeout_seconds",
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
         )
+        put("session_select_votes", _env_int("CODEMEM_SESSION_SELECT_VOTES", 1))
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", (_env_str("CODEMEM_LLM_BASE_URL", None) or "").strip() or None)
         put("llm_api_key", (_env_str("CODEMEM_LLM_API_KEY", None) or "").strip() or None)

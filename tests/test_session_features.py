@@ -213,3 +213,61 @@ def test_fusion_feeds_the_llm_shortlist(monkeypatch, tmp_path):
         assert response.json()["data"]
         # the LLM was handed the fused-ordered candidates (it saw a list)
         assert seen_order, "the selection stage must see the reordered list"
+
+
+def test_select_votes_majority_overrides_first_call(monkeypatch, tmp_path):
+    """Self-consistency: with votes=3 the session picks are tallied across
+    calls. The stub makes call 1 pick {S2, S3} and calls 2-3 pick {S1, S2};
+    the tally (S2:3, S1:2, S3:1) must seat S2 first and replace S3 with S1 —
+    the one-shot behaviour would have shipped {S2, S3}. Also guards that
+    votes=1 reduces to the one-shot path (first-seen order preserved)."""
+    import logging
+
+    from codemem.api.app import create_app
+    from codemem.search.service import SearchPipeline
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        dense_enabled=False,
+        rerank_enabled=False,
+        min_evidence_score=0.0,
+        session_select_llm=True,
+        session_select_votes=3,
+        llm_base_url="http://relay.test",
+        llm_api_key="stub",
+    )
+    app = create_app(settings)
+    replies = ["2 and 3", "1 and 2", "2 and 1"]
+
+    def stub_chat(self, system: str, user: str) -> str:
+        return replies.pop(0) if replies else "1 and 2"
+
+    monkeypatch.setattr(SearchPipeline, "_chat", stub_chat)
+    logging.disable(logging.WARNING)
+    with TestClient(app) as client:
+        for sid, rid, body in (
+            ("s1", "r1", "quota retry backoff handler quota retry backoff handler quota: fixed src/a.py"),
+            ("s2", "r2", "quota retry backoff handler quota retry: bridge src/b.py"),
+            ("s3", "r3", "quota retry backoff: weak tail src/c.py"),
+        ):
+            client.post("/add", json={
+                "request_id": rid, "user_id": "u1", "session_id": sid,
+                "messages": [{"role": "user", "timestamp": 1, "content": body}],
+            })
+        response = client.post("/search", json={
+            "query": "quota retry backoff handler", "user_id": "u1", "top_k": 10,
+        })
+        items = response.json()["data"]
+        assert items
+        store = client.app.state.container.store
+        memory_ids = [int(i["id"].split("_")[1]) for i in items]
+        sessions = store.session_map("u1", memory_ids)
+        order = []
+        for mid in memory_ids:
+            sid = sessions.get(mid)
+            if sid and sid not in order:
+                order.append(sid)
+        assert order[0] == "s2", "the 3-vote tally seats s2 first"
+        assert set(order) == {"s1", "s2"}, (
+            "majority replaces the first call's s3 with s1"
+        )

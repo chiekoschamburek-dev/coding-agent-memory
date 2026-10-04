@@ -450,6 +450,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="two-stage session selection: one gpt-4o-mini "
                              "call picks the two sessions that record the "
                              "cause/fix from compact summaries")
+    parser.add_argument("--session-select-votes", type=int, default=None,
+                        help="selection self-consistency: run the selection "
+                             "call N times and majority-vote the session "
+                             "picks (1 = one-shot, the shipped behaviour)")
     parser.add_argument("--session-feature-fusion", action="store_true",
                         help="rank-fuse two session-level signals into the "
                              "session order")
@@ -519,6 +523,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_feature_fusion"] = True
     if getattr(args, "session_select_llm", False):
         overrides["session_select_llm"] = True
+    if getattr(args, "session_select_votes", None) is not None:
+        overrides["session_select_votes"] = args.session_select_votes
     if args.dense_enabled is not None:
         overrides["dense_enabled"] = args.dense_enabled.lower() == "true"
     if args.rerank_enabled is not None:

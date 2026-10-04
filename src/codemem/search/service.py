@@ -313,12 +313,31 @@ class SearchPipeline:
                 "Which TWO sessions record the cause or the fix of this "
                 "problem? Reply with the two numbers."
             )
-            reply = self._chat(self._SELECT_SYSTEM, user)
-            if not reply:
-                return None
-            numbers = [int(n) for n in re.findall(r"\d+", reply)]
-            picked = [order[n - 1] for n in numbers if 1 <= n <= len(order)]
-            picked = list(dict.fromkeys(picked))[:2]
+            # Self-consistency: the digest replay measured 8 of the 11
+            # recorded judgment misses flipping on a single re-call at
+            # temperature 0 — those queries sit on the decision boundary and
+            # the one-shot pick samples cross-request variance. With
+            # votes > 1 the picks are tallied across calls and the mode
+            # wins; with votes = 1 this is the shipped one-shot path
+            # unchanged (first-seen order preserves the reply's preference).
+            votes = max(1, int(self.settings.session_select_votes))
+            tally: dict[str, int] = {}
+            first_seen: dict[str, int] = {}
+            for _ in range(votes):
+                reply = self._chat(self._SELECT_SYSTEM, user)
+                if not reply:
+                    continue
+                numbers = [int(n) for n in re.findall(r"\d+", reply)]
+                one = [order[n - 1] for n in numbers if 1 <= n <= len(order)]
+                one = list(dict.fromkeys(one))[:2]
+                if len(one) < 2:
+                    continue
+                for pos, sid in enumerate(one):
+                    first_seen.setdefault(sid, pos)
+                    tally[sid] = tally.get(sid, 0) + 1
+            picked = sorted(
+                tally, key=lambda s: (-tally[s], first_seen[s])
+            )[:2]
             if len(picked) < 2:
                 return None
             log.info(
