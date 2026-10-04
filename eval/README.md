@@ -751,6 +751,16 @@ an established effect. It is nonetheless the first measurement in this file
 where the two payload shapes separated, and it separated on the axis the
 evidence metric predicted.
 
+**Pre-registered confirmation run.** Arm: `session_select_llm` (the
+deployment default, frozen 2026-10-04). Expectation: majority accuracy
+0.414 ± the instrument's 2–3-question noise; secondary: answer-session reach
+≈46.6 %, zero relay failures. This guards **run variance and relay jitter
+only** — the arm was selected from seven measured on this same question set,
+so selection bias is real and is guarded by the triangular support (proxy
+significance + answer-direction + mechanism alignment) and ultimately by the
+platform's own Full evaluation, not by this rerun. Confirmed result recorded
+below once run.
+
 **How the answer model locates the file without memory.** Measured, not assumed,
 because the initial explanation ("it knows the repository") turned out to be only
 half right:

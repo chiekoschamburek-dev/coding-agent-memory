@@ -154,8 +154,18 @@ class Settings:
     # the platform's Answer model makes ("can this context answer this
     # question"), made over session-level summaries rather than single
     # chunks (what the failed listwise stage scored). Takes precedence over
-    # session_feature_fusion when it succeeds. Off by default.
-    session_select_llm: bool = False
+    # session_feature_fusion when it succeeds. On by default as the
+    # deployment default (eval/README.md, seven-arm leaderboard): it degrades
+    # to the shipped ordering on any relay failure — no relay configured,
+    # timeout, or unparseable reply all fall back, so the flag is safe to
+    # ship enabled.
+    session_select_llm: bool = True
+    # Hard budget for the selection call. The relay answered in ~1 s when
+    # healthy; 10 s bounds the tail so the fallback (shipped ordering) fires
+    # well inside the platform's 30-minute Search ceiling while keeping
+    # Search latency sane. Quantify the fallback rate during the deployment
+    # soak and re-tune there.
+    session_select_timeout_seconds: float = 10.0
     # Cap on distinct sessions in one payload. 0 means unlimited, which was the
     # earlier default. Tightening it to 2 is the companion move to the cap
     # increase above: with fewer sessions competing for the token prefix,
@@ -550,7 +560,11 @@ class Settings:
         put("card_enabled", _env_bool("CODEMEM_CARDS", False))
         put("session_score_topk", _env_int("CODEMEM_SESSION_SCORE_TOPK", 1))
         put("session_feature_fusion", _env_bool("CODEMEM_SESSION_FEATURE_FUSION", False))
-        put("session_select_llm", _env_bool("CODEMEM_SESSION_SELECT_LLM", False))
+        put("session_select_llm", _env_bool("CODEMEM_SESSION_SELECT_LLM", True))
+        put(
+            "session_select_timeout_seconds",
+            _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
+        )
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))

@@ -338,14 +338,20 @@ class SearchPipeline:
             return None
 
     def _chat(self, system: str, user: str) -> str | None:
-        """One chat completion against the configured relay. Never raises."""
+        """One chat completion against the configured relay. Never raises.
+
+        The selection call runs on its own hard budget
+        (``session_select_timeout_seconds``): the relay answered in ~1 s when
+        healthy, and the fallback to the shipped ordering only exists if it
+        fires before the caller gives up on Search.
+        """
         try:
             from openai import OpenAI
 
             client = OpenAI(
                 base_url=self.settings.llm_base_url,
                 api_key=self.settings.llm_api_key,
-                timeout=self.settings.llm_timeout_seconds,
+                timeout=self.settings.session_select_timeout_seconds,
             )
             response = client.chat.completions.create(
                 model=self.settings.llm_model,

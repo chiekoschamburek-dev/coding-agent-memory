@@ -101,8 +101,13 @@ def test_no_fusion_keeps_the_head_order(tmp_path):
     assert sessions[0] == "head"
 
 
-def test_off_by_default(tmp_path):
-    assert Settings().session_feature_fusion is False
+def test_fusion_off_select_on_by_default(tmp_path):
+    """Fusion stays an opt-in lever; selection is the deployment default and
+    must degrade to the shipped ordering when no relay is configured."""
+    s = Settings()
+    assert s.session_feature_fusion is False
+    assert s.session_select_llm is True
+    assert s.session_select_timeout_seconds == 10.0
 
 
 def test_session_terms_requires_topic_length():

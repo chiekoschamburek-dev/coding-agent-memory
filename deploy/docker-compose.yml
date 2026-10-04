@@ -27,6 +27,8 @@ services:
       # Enrichment is not implemented yet; the service is fully functional
       # without it. These settings currently affect only scripts/probe_provider.py.
       CODEMEM_LLM_ENABLED: "${CODEMEM_LLM_ENABLED:-false}"
+      CODEMEM_SESSION_SELECT_LLM: "${CODEMEM_SESSION_SELECT_LLM:-true}"
+      CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS: "${CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS:-10}"
       CODEMEM_LLM_BASE_URL: "${CODEMEM_LLM_BASE_URL:-}"
       CODEMEM_LLM_API_KEY: "${CODEMEM_LLM_API_KEY:-}"
       CODEMEM_LLM_MODEL: "${CODEMEM_LLM_MODEL:-gpt-4o-mini}"
