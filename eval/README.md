@@ -827,9 +827,50 @@ default 1 = one-shot byte-for-byte, guard-tested): sample the relay's
 cross-request variance N times and take the mode. Judged on the new
 instrument below, never on the frozen one.
 
+### The claim-topical instrument: first build voided by its own floor, rebuilt with a semantic adversarial lead (2026-10-05)
+
+The parked instrument-growth item, built twice. `eval/build_qa_claim.py`
+anchors relevance by embedding cosine between the issue and the sessions'
+recorded claims (first message as a tie signal); file overlap is never
+consulted. Gold/distractor discipline inherits the procedure set's
+machinery (cause-marked, identifier-bearing, unleaked, single-chunk-
+carriable claims; one use per claim globally).
+
+**The first build failed its own validity check.** 50 questions, issue-word
+baseline 0.020, anchor coincidence 32/50 — and a no-memory floor of
+**0.500** on the 34-question tuning split (94 % unanimous: systematic, not
+noise). The max arm scored 0.382 **below the floor** — retrieved noise
+displacing the model's own reasoning, the RAG pathology again. The
+mechanism: a claim-topical anchor selects sessions whose claims are
+embedding-close to the issue, and the gold — though lexically distant —
+remains the *semantically plausible diagnosis*. The answer model guesses
+"which option sounds like the right diagnosis for this issue" far better
+than term-overlap baselines price. The set was voided per its own
+`validity_check`; the aborted select-arm run on it is not a result.
+
+**The rebuild adds the semantic adversarial lead.** The designated
+distractor must beat the gold on issue-embedding cosine (the gold keeps
+the least-term-overlap rule), and a zero-relay proxy — the fraction of
+questions where the max-cosine option is the gold — is reported at build
+time. Necessary but not sufficient: the first build's proxy was also low
+while its true floor was 0.500, so the no-memory run stays the arbiter.
+Widened to top-5 anchors and two questions per query: **105 questions —
+70 tuning, 35 sealed** (the sealed file stays untouched until a final
+confirmation). Term baseline 0.181 (below chance — the adversarial lead
+now points the lexical shortcut *away*), semantic proxy 0.000, anchor
+coincidence with the file-overlap set 65/105.
+
+Instrument limits, stated before any arm is read on it: 70 tuning
+questions resolve effects of ~6+ points at best, and per-query
+multiplicity means issue texts repeat — it is a **direction probe for
+generalisation** (does arm ordering agree across anchors?), not a
+significance instrument. Significance remains the frozen 58-question set's
+triangulation and the platform's evaluation.
+
 **How the answer model locates the file without memory.** Measured, not assumed,
 because the initial explanation ("it knows the repository") turned out to be only
 half right:
+
 
 | mechanism | evidence |
 |---|---|

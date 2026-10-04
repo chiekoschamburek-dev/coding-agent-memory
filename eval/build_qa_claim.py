@@ -149,76 +149,101 @@ def build(benchmark: Path, *, n_distractors: int = 3, seed: int = 20261005,
             return len(content_terms(text) & _terms)
 
         anchored = [
-            (sid, session_claims[sid]) for _, sid in affinity[:3]
+            (sid, session_claims[sid]) for _, sid in affinity[:5]
             if session_claims[sid]
         ]
         if not anchored:
             skipped["anchor_has_no_claim"] += 1
             continue
-        anchor_id = anchored[0][0]
-        if anchor_id in old_anchors[query["instance_id"]]:
-            anchor_overlap += 1
-        found = anchored[0][1]
+        questions_this_query = 0
+        emitted_any = False
 
-        ranked = sorted(enumerate(found), key=lambda p: (overlap(p[1]), -p[0]))
-        emitted = False
-        for claim_index_pos, _ in ranked:
-            gold = found[claim_index_pos]
-            if normalise(gold)[:80] in used_golds:
-                continue
-            gold_overlap = overlap(gold)
-            gold_sh = shingles(gold)
-            pool: list[tuple[int, str, str]] = []
-            for other_id in repo_sessions[query["repo"]]:
-                if other_id == anchor_id:
-                    continue
-                other = memories.get(other_id)
-                if other is None:
-                    continue
-                for claim in claims_of(other, issue_sh, min_overlap):
-                    if shingles(claim) & gold_sh:
-                        continue
-                    pool.append((overlap(claim), other_id, claim))
-            if len(pool) < n_distractors:
-                skipped["too_few_distractors"] += 1
-                continue
-            decoys = [p for p in pool if p[0] > gold_overlap]
-            if not decoys:
-                skipped["gold_is_most_topical"] += 1
-                continue
-            lead = max(decoys, key=lambda p: (p[0], p[1]))
-            chosen = [lead] + rng.sample(
-                [p for p in pool if p is not lead], n_distractors - 1
+        for anchor_id, found in anchored:
+            if questions_this_query >= 2:
+                break
+            if anchor_id in old_anchors[query["instance_id"]]:
+                anchor_overlap += 1
+
+            # Gold = the qualifying claim least close to the issue by term
+            # overlap (the procedure set's rule); the adversarial constraint
+            # below handles the semantic side.
+            ranked = sorted(
+                enumerate(found), key=lambda p: (overlap(p[1]), -p[0])
             )
-            options = [gold] + [claim for _, _, claim in chosen]
-            rng.shuffle(options)
-            questions.append({
-                "query_id": f"claim::{query['instance_id']}",
-                "instance_id": query["instance_id"],
-                "repo": query["repo"],
-                "question_type": "claim-topical recall",
-                "question": (
-                    "An earlier engineering session in this repository worked on a "
-                    "problem related to the issue below. That session is not visible "
-                    "to you except through any memory you are given.\n\n"
-                    "Issue:\n" + issue.strip()[:2500] + "\n\n"
-                    "Which statement about that problem did that earlier session "
-                    "record while working on it?"
-                ),
-                "options": options,
-                "gold_index": options.index(gold),
-                "gold_claim": gold,
-                "answer_session": anchor_id,
-                "anchor_affinity": round(affinity[0][0], 4),
-                "anchor_is_file_overlap": anchor_id in old_anchors[
-                    query["instance_id"]
-                ],
-                "distractor_sessions": [sid for _, sid, _ in chosen],
-            })
-            used_golds.add(normalise(gold)[:80])
-            emitted = True
-            break
-        if not emitted:
+            emitted = False
+            for claim_index_pos, _ in ranked:
+                gold = found[claim_index_pos]
+                if normalise(gold)[:80] in used_golds:
+                    continue
+                gold_overlap = overlap(gold)
+                gold_cos = cosine(ivec, claim_vecs.get(gold, [0.0]))
+                gold_sh = shingles(gold)
+                pool: list[tuple[int, str, str, float]] = []
+                for other_id in repo_sessions[query["repo"]]:
+                    if other_id == anchor_id:
+                        continue
+                    other = memories.get(other_id)
+                    if other is None:
+                        continue
+                    for claim in claims_of(other, issue_sh, min_overlap):
+                        if shingles(claim) & gold_sh:
+                            continue
+                        pool.append((
+                            overlap(claim), other_id, claim,
+                            cosine(ivec, claim_vecs.get(claim, [0.0])),
+                        ))
+                if len(pool) < n_distractors:
+                    skipped["too_few_distractors"] += 1
+                    continue
+                # Adversarial lead in semantic space: the designated
+                # distractor must be MORE similar to the issue than the
+                # gold, so the "sounds like the right diagnosis" shortcut
+                # points away from the answer (the term-overlap shortcut is
+                # already handled by the gold's least-overlap selection).
+                decoys = [p for p in pool if p[3] > gold_cos]
+                if not decoys:
+                    skipped["gold_is_most_topical"] += 1
+                    continue
+                lead = max(decoys, key=lambda p: (p[3], p[0], p[1]))
+                chosen = [lead] + rng.sample(
+                    [p for p in pool if p is not lead], n_distractors - 1
+                )
+                options = [gold] + [claim for _, _, claim, _ in chosen]
+                rng.shuffle(options)
+                questions.append({
+                    "query_id": (
+                        f"claim::{query['instance_id']}"
+                        if questions_this_query == 0
+                        else f"claim::{query['instance_id']}::{questions_this_query + 1}"
+                    ),
+                    "instance_id": query["instance_id"],
+                    "repo": query["repo"],
+                    "question_type": "claim-topical recall",
+                    "question": (
+                        "An earlier engineering session in this repository worked on a "
+                        "problem related to the issue below. That session is not visible "
+                        "to you except through any memory you are given.\n\n"
+                        "Issue:\n" + issue.strip()[:2500] + "\n\n"
+                        "Which statement about that problem did that earlier session "
+                        "record while working on it?"
+                    ),
+                    "options": options,
+                    "gold_index": options.index(gold),
+                    "gold_claim": gold,
+                    "answer_session": anchor_id,
+                    "anchor_affinity": round(affinity[0][0], 4),
+                    "anchor_is_file_overlap": anchor_id in old_anchors[
+                        query["instance_id"]
+                    ],
+                    "distractor_sessions": [sid for _, sid, _, _ in chosen],
+                })
+                used_golds.add(normalise(gold)[:80])
+                emitted = True
+                emitted_any = True
+                questions_this_query += 1
+                if questions_this_query >= 2:
+                    break
+        if not emitted_any:
             skipped["no_acceptable_gold"] += 1
 
     if verbose:
@@ -234,6 +259,25 @@ def build(benchmark: Path, *, n_distractors: int = 3, seed: int = 20261005,
         guess = guessability(questions)
         print(f"  ISSUE-WORD BASELINE picks the gold: {guess:.3f} "
               f"(chance {1 / (n_distractors + 1):.3f})")
+        ivec_by_instance = {
+            bench["queries"][i]["instance_id"]: issue_vecs[i]
+            for i in range(len(bench["queries"]))
+        }
+        sem_hits = 0
+        for q in questions:
+            ivec = ivec_by_instance.get(q["instance_id"])
+            if ivec is None:
+                continue
+            scored = [
+                cosine(ivec, claim_vecs.get(o, [0.0])) for o in q["options"]
+            ]
+            best = max(scored)
+            if best and scored.index(best) == q["gold_index"] \
+                    and scored.count(best) == 1:
+                sem_hits += 1
+        sem = sem_hits / len(questions) if questions else 0.0
+        print(f"  SEMANTIC BASELINE picks the gold: {sem:.3f} "
+              f"(the no-memory floor proxy; must stay <= ~0.35)")
         lens = sorted(len(q["gold_claim"]) for q in questions)
         if lens:
             print(f"  claim length (chars): median {lens[len(lens) // 2]} "
