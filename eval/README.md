@@ -867,6 +867,66 @@ generalisation** (does arm ordering agree across anchors?), not a
 significance instrument. Significance remains the frozen 58-question set's
 triangulation and the platform's evaluation.
 
+### The generalisation verdict: the champion reverses; the default follows the evidence (2026-10-05)
+
+Three arms on the rebuilt claim instrument (70 tuning questions, ×5
+majority, zero relay failures):
+
+| arm | accuracy | answer-session reach |
+|---|---|---|
+| no-memory floor | **0.243** (= chance; the instrument is valid) | — |
+| shipped ordering (`max`, select off) | **0.300** | 30/70 |
+| `session_select_llm` | 0.229 | 26/70 |
+| `session_select_llm` + votes=3 | 0.214 | 26/70 |
+
+**The seven-arm champion does not generalise.** On the file-overlap
+instrument select-llm beat the deterministic ordering by +5.2 pp; on the
+leak-free claim-topical instrument it loses by 7.1 pp and falls **below
+the no-memory floor**. The mechanism, confirmed by the one-call probe
+(`scripts/claim_select_probe.py`, 70 questions): the selection judgement
+inherits the answer model's prior. The old instrument's floor was 0.328 —
+its options leaked toward the gold, the model's prior pointed right, and
+aligning with it won. The claim instrument's adversarial construction
+points the prior at the distractors, and alignment amplifies the error:
+27 of 140 picks landed on the question's own distractor sessions. On this
+anchor the menu itself is the binding constraint (the answer session
+reaches the top-8 for only 22/70 — the recall channels are file/vocabulary
+machinery and the claim-topical anchors are often not file-overlap
+sessions), and where the answer IS on the menu the judgement picks it
+13/22 — the failure is what the prior does everywhere else.
+
+**Selection self-consistency is dead, with the cleanest mechanism of the
+campaign:** votes=3 scores *below* the one-shot (0.214 vs 0.229). Majority
+voting fixes variance, not bias — when the judgement is systematically
+attracted to distractors, repeated calls agree with each other and the
+majority entrenches the error. The digest replay's "8/11 flip on re-call"
+was boundary jitter on one instrument; on the other the errors are
+systematic. `CODEMEM_SESSION_SELECT_VOTES` stays implemented, default 1,
+documented dead.
+
+**The default follows the evidence — reversed.** Two instruments now
+bracket the platform's unknown distribution: on the leak-prone end
+select-llm wins (+5.2), on the leak-free adversarial end it loses (−7.1)
+and can fall below no-memory — the cardinal sin under the RAG doctrine.
+The deterministic ordering is never below the floor on either instrument.
+`session_select_llm` ships **off** as of 2026-10-05 (one env flip
+re-enables it; the fail-safe fallback path is unchanged). The
+reconciliation caveat is recorded, not hidden: the e2e `max` arm showed
+the answer session in 30/70 payloads while the probe's replay puts it in
+the top-8 menu for 22/70 — the live Search's session order and the replay
+disagree for ~8 questions (plan-with-options vs question-only is the
+likely source); it does not touch the arm ordering, which rests on the
+e2e numbers alone.
+
+What this does to the parked items: **the card's case shifted from digest
+quality to recall** — on the claim anchor the binding constraint is menu
+membership (48/70 answer sessions never reach the top-8), which is
+exactly what a session-level candidate object attacks; the ~3 hard digest
+misses on the old instrument are the residue of the old justification.
+Chunk-level selection is unchanged: the deterministic tilt/promotion
+shipped; an LLM span-picker remains unproven on both anchors.
+
+
 **How the answer model locates the file without memory.** Measured, not assumed,
 because the initial explanation ("it knows the repository") turned out to be only
 half right:
@@ -1566,7 +1626,10 @@ was taken on 2026-10-04 (`docs/SUBMISSION.md` §2): `session_select_llm` is
 the deployment default (19cc935, fail-safe — every relay failure mode
 degrades to the shipped ordering), confirmed by the pre-registered run
 (0.414 reproduced to the question, zero discordant pairs — the
-confirmation section above); `dense_eligible@0.45` is the smoke-window A/B arm; fusion and
+confirmation section above). **Reversed 2026-10-05**: the claim-topical
+second anchor measured select-llm below the no-memory floor (see the
+generalisation-verdict section) and the default returned to off;
+`dense_eligible@0.45` remains the smoke-window A/B arm; fusion and
 top-k mass stay off as documented levers.
 
 ### The algorithmic frontier map (closing the campaign, 2026-10-04)

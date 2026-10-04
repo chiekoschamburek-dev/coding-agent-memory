@@ -101,12 +101,14 @@ def test_no_fusion_keeps_the_head_order(tmp_path):
     assert sessions[0] == "head"
 
 
-def test_fusion_off_select_on_by_default(tmp_path):
-    """Fusion stays an opt-in lever; selection is the deployment default and
-    must degrade to the shipped ordering when no relay is configured."""
+def test_fusion_off_select_off_by_default(tmp_path):
+    """Fusion and selection stay opt-in levers: selection was the seven-arm
+    champion on the file-overlap instrument and reversed below the
+    no-memory floor on the leak-free claim-topical one, so the
+    deterministic ordering ships. Re-enable with one env flip."""
     s = Settings()
     assert s.session_feature_fusion is False
-    assert s.session_select_llm is True
+    assert s.session_select_llm is False
     assert s.session_select_timeout_seconds == 10.0
 
 

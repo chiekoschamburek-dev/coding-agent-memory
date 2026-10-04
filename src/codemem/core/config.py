@@ -154,12 +154,15 @@ class Settings:
     # the platform's Answer model makes ("can this context answer this
     # question"), made over session-level summaries rather than single
     # chunks (what the failed listwise stage scored). Takes precedence over
-    # session_feature_fusion when it succeeds. On by default as the
-    # deployment default (eval/README.md, seven-arm leaderboard): it degrades
-    # to the shipped ordering on any relay failure — no relay configured,
-    # timeout, or unparseable reply all fall back, so the flag is safe to
-    # ship enabled.
-    session_select_llm: bool = True
+    # session_feature_fusion when it succeeds. Off by default: the
+    # seven-arm champion on the file-overlap instrument (0.414 vs 0.362)
+    # REVERSED on the leak-free claim-topical instrument (0.229 vs 0.300,
+    # below the 0.243 no-memory floor) — the selection inherits the answer
+    # model's prior, and where that prior points at distractors the
+    # alignment amplifies the error. Under cross-anchor uncertainty the
+    # deterministic ordering is the never-below-floor default (eval/
+    # README.md, the claim-instrument section). One env flip re-enables.
+    session_select_llm: bool = False
     # Hard budget for the selection call. The relay answered in ~1 s when
     # healthy; 10 s bounds the tail so the fallback (shipped ordering) fires
     # well inside the platform's 30-minute Search ceiling while keeping
@@ -568,7 +571,7 @@ class Settings:
         put("card_enabled", _env_bool("CODEMEM_CARDS", False))
         put("session_score_topk", _env_int("CODEMEM_SESSION_SCORE_TOPK", 1))
         put("session_feature_fusion", _env_bool("CODEMEM_SESSION_FEATURE_FUSION", False))
-        put("session_select_llm", _env_bool("CODEMEM_SESSION_SELECT_LLM", True))
+        put("session_select_llm", _env_bool("CODEMEM_SESSION_SELECT_LLM", False))
         put(
             "session_select_timeout_seconds",
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
