@@ -1284,13 +1284,18 @@ does not degrade, and the payload grows by 0.4 entries (top-3 buys +0.3pp
 recall for +0.11 more entries with visibly weaker precision confidence).
 Evidence metric at top-2 (30 q): decidable unchanged (0.567), decisive
 0.767 → 0.800, payload −16 % (2 408 → 2 014 tokens) — no downside measured.
-The procedure e2e verification of top-2 is **pending infrastructure**: two
-attempts were invalidated because the answer relay began rejecting large
-requests (`insufficient_user_quota` — the account balance no longer covers
-the per-call pre-charge of a several-thousand-token prompt; small probes
-pass, full-context calls fail with 403). The proxy and evidence numbers
-above are relay-free and stand; the e2e re-run is one command once the
-account is topped up.
+Procedure e2e (58 q × 5, after the relay quota was topped up; two earlier
+attempts were invalidated wholesale by `insufficient_user_quota` 403s and
+are not results): **0.379 vs shipped 0.362** (+1/−0, p=1.0), answer-session
+reach 34.5 % → 37.9 %. The accuracy gain is one question — within the noise
+this instrument can resolve — but the direction agrees with the proxy's
+significant recall/nDCG gains, and the cost axis (payload, ambiguity,
+decisive markers) shows no regression on any instrument. Shipped as
+`session_score_topk=2`? Not yet: the e2e gain is one question, and the
+proxy's significant recall gain is on session-labelled ground truth that
+cannot price payload usefulness — the same asymmetry documented for the
+entry-order rejection. Default stays 1; top-2 is recorded as the best
+measured ranking candidate alongside `dense_eligible@0.45`.
 
 ### Assembly: sessions rank, chunks are evidence
 
