@@ -758,8 +758,12 @@ deployment default, frozen 2026-10-04). Expectation: majority accuracy
 only** — the arm was selected from seven measured on this same question set,
 so selection bias is real and is guarded by the triangular support (proxy
 significance + answer-direction + mechanism alignment) and ultimately by the
-platform's own Full evaluation, not by this rerun. Confirmed result recorded
-below once run.
+platform's own Full evaluation, not by this rerun.
+
+**Confirmed (2026-10-04, run 2): 0.414 → 0.414.** Majority accuracy
+reproduced to the question — 0 discordant pairs out of 58 (p=1.0) — with
+reach 48.3 % (was 46.6 %), 96.6 % unanimous, zero relay failures. The
+deployment default stands as frozen.
 
 **How the answer model locates the file without memory.** Measured, not assumed,
 because the initial explanation ("it knows the repository") turned out to be only
