@@ -1418,6 +1418,37 @@ Three decisions fall straight out:
    first time, with the expected value known before running. The remaining
    11 llm-judgment misses are summary quality — parked-card territory.
 
+### The fusion+select stack: measured, does not convert (2026-10-04)
+
+The one stacking run the miss decomposition licensed (ceiling ~6 questions).
+Fusion now feeds the shortlist — the fused ordering is applied to the
+reranked list before the LLM call (`fused_session_order`, shared by both call
+sites; guard-tested) — and the LLM picks from the fused top-8.
+
+| comparison | accuracy | paired |
+|---|---|---|
+| shipped | 0.362 | — |
+| **stack (fusion → select)** | **0.397** | +3/−1 vs shipped, p=0.63 |
+| select-llm alone | **0.414** | stack −1 question, p=1.0 |
+| gate alone | 0.397 | identical to stack, +2/−2 |
+
+The 6-question ceiling was an upper bound, not an expectation: fusion's
+reordering changed the shortlist (mean relevant-in-context rose 1.03 → 1.24,
+payload −0.3 entries) but answer-session reach *fell* slightly (46.6 % →
+43.1 %) — the fused shortlist traded some sessions the LLM had been picking
+correctly for different ones, and the judgment errors ate the supply. Final
+procedure-e2e leaderboard (n=58 × 5, seven arms): RAG 0.224 < prior 0.328 <
+fusion 0.345 < shipped 0.362 < gate = stack 0.397 < **select-llm 0.414**.
+
+The session-ranking campaign is measured to completion. Select-llm is the
+champion on both the proxy (MRR +0.107, p<0.001) and the answer metric
+(+0.052 over shipped, the largest single-arm gain, n.s. at n=58); fusion is
+significant on the proxy and the reach leader on its own; neither stack
+improves on select alone. All three levers stay flags, defaults unchanged —
+the ship decision among {gate 0.45, fusion, select-llm} belongs to the
+deployment smoke window, with `docs/SUBMISSION.md` holding the trade-off
+tables.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
