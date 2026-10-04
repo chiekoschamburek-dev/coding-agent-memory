@@ -32,6 +32,38 @@ returns nothing until it completes. So:
   domain is genuinely required, set the proxy read timeout above 1 800 s and
   confirm with a deliberately slow Add rather than assuming.
 
+## Measured under load with the selection stage on (2026-10-04)
+
+`scripts/loadtest.py`, 2 writers + 4 searchers, 45 s, select-llm enabled
+(relay = gpt-4o-mini):
+
+| scenario | search p50 | search p95 | errors | notes |
+|---|---|---|---|---|
+| relay healthy | **4.9 s** | 6.6 s | 0 | the selection call dominates latency: ~19 selections in the window, relay queuing under 4-way concurrency |
+| relay broken (bad URL → instant fail) | 0.23 s | 0.35 s | 0 | the fallback is invisible to clients; throughput rises 20× |
+| relay absent (no creds) | 0.29 s | 0.35 s | 0 | same |
+
+Three operational facts for the one-shot window:
+
+1. **Latency is a non-issue against the 30-minute per-request ceiling** —
+   even the degraded-queueing case is 360× inside it. Do not tune this.
+2. **Throughput collapses when selections are slow** (37 vs 775 searches in
+   the window): if the platform issues searches concurrently, the relay's
+   rate limit is the service's throughput limit. The fallback keeps every
+   response contract-correct, so this degrades quality (no selection),
+   never availability.
+3. **Watch the relay balance for the whole 30-day window** — a drained
+   balance fails every large prompt while tiny probes still pass (measured:
+   `insufficient_user_quota`), which silently reverts the deployment to
+   shipped-ordering quality. The `selection LLM call failed` warning count
+   in the logs is the soak metric.
+
+Also caught by this test and fixed in code: a CRLF `.env` puts a trailing
+`` into `CODEMEM_LLM_BASE_URL`, which the OpenAI client rejects for every
+selection call (measured: 388/775 silent fallbacks). `Settings` now strips
+the URL/key/model; keep `.env` handling in mind if env is injected another
+way.
+
 ## The image is host-agnostic
 
 The same image runs anywhere, so the ingress choice does not affect the code:

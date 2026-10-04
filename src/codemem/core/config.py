@@ -566,9 +566,9 @@ class Settings:
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
         )
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
-        put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
-        put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))
-        put("llm_model", _env_str("CODEMEM_LLM_MODEL", "gpt-4o-mini"))
+        put("llm_base_url", (_env_str("CODEMEM_LLM_BASE_URL", None) or "").strip() or None)
+        put("llm_api_key", (_env_str("CODEMEM_LLM_API_KEY", None) or "").strip() or None)
+        put("llm_model", _env_str("CODEMEM_LLM_MODEL", "gpt-4o-mini").strip())
         put("enrich_ratio", _env_float("CODEMEM_ENRICH_RATIO", 0.25))
         put("dense_enabled", _env_bool("CODEMEM_DENSE_ENABLED", True))
         put("embed_backend", _env_str("CODEMEM_EMBED_BACKEND", "local"))
