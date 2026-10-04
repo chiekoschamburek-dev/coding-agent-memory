@@ -1312,6 +1312,46 @@ on answer accuracy they are within noise of one another; the ship decision
 between {gate, top-2, combo} stays open pending a larger instrument, and the
 default configuration stays unchanged.
 
+### Session-feature fusion: the first significant session-ranking win (2026-10-04)
+
+Path 1 of the three-road plan (free structural signals, offline replay
+`scripts/session_features.py`). The replay validated bitwise against the
+measured pipeline once two aggregations were separated — pair-micro 0.2763
+(the funnel's 27.6 %) vs query-macro 0.4746 (the recall@10 run_benchmark
+reports) — and exposed a mechanism worth recording: the naive "first two
+sessions in rank order" loses 20 points to the real assembler, because the
+noise gate **skips** weak-head sessions and later ones take the slot. Four
+features were replayed; two survived, two were rejected on the replay itself:
+
+| feature | replay (macro) | verdict |
+|---|---|---|
+| F1 query ↔ session's **first message** cosine | 0.4747 alone; **0.5040–0.5046** rank-fused with the head | kept — the issue statement lives at the trajectory head, in query vocabulary |
+| F2 **rare-vocabulary union coverage** of pooled chunks | 0.5001–0.5102 fused | kept — invisible to per-chunk max |
+| F3 cause-lexicon prose × query identifier | exactly 0.4746 | rejected — the signal is too sparse in this corpus |
+| F4 supersede-chain terminality (timestamp proxy) | 0.1161 alone, negative fused | rejected — strongly harmful |
+| F1 + F2 stacked (w=2/2) | **0.5354 offline** | shipped behind the flag |
+
+Implemented as `session_feature_fusion` (off by default): the service computes
+F1 (one embed call over the candidate sessions' first messages) and F2 (union
+coverage of the query's rare terms by pooled chunk texts), and `assemble`
+rank-fuses them into the session order (weights 2.0/2.0, the offline plateau's
+interior). Measured in product on all three instruments:
+
+| instrument | shipped | fusion | paired |
+|---|---|---|---|
+| proxy, session recall@10 (89 q) | 0.4746 | **0.5354** | **+0.061, p=0.001** — matches the offline prediction to four decimals |
+| proxy, session MRR | 0.7584 | 0.8483 | +0.090, p=0.009 |
+| proxy, entry precision@10 | 0.5361 | 0.5994 | +0.063, p=0.033 |
+| evidence, decidable (30 q) | 0.567 | 0.600 | +4/−3, n.s.; payload −8 % |
+| procedure e2e accuracy (58 q × 5) | 0.362 | 0.345 | −1 question, p=1.0 |
+| procedure e2e, **answer session shown** | 34.5 % | **46.6 %** | **+12.1 pp — the largest reach gain measured** |
+
+The retrieval win is real, significant, and free (no LLM in the graded path,
+one embed call per search); the accuracy on the memory-dependent question
+type is flat — reaching more answer sessions did not convert into answers,
+which is precisely the question path 2 (LLM two-stage selection) is designed
+to test, now with better material to select from.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

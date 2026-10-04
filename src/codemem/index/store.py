@@ -415,6 +415,25 @@ class Store:
             )
         return memory_id
 
+    def first_messages(self, user_id: str, session_ids: Sequence[str]) -> dict[str, str]:
+        """The first raw message per session — the task/issue statement.
+
+        The trajectory's head is where the problem is stated in the vocabulary
+        an issue-like query uses; the edits the session later makes are in
+        tool vocabulary. Used by the session-feature fusion (F1).
+        """
+        out: dict[str, str] = {}
+        with self._read() as conn:
+            for sid in session_ids:
+                row = conn.execute(
+                    "SELECT content FROM raw_message WHERE user_id = ? AND session_id = ?"
+                    " ORDER BY msg_index LIMIT 1",
+                    (user_id, sid),
+                ).fetchone()
+                if row:
+                    out[sid] = row["content"]
+        return out
+
     def session_chunk_memories(
         self, user_id: str, session_id: str, limit: int
     ) -> list[MemoryRow]:

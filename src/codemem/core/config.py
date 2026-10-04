@@ -140,6 +140,14 @@ class Settings:
     # session with several moderately matching chunks can outrank one with a
     # single lucky high scorer. The noise gate keeps reading the head.
     session_score_topk: int = 1
+    # Rank-fuse two session-level signals into the session order (eval/
+    # README.md, the session-feature section): F1, the cosine between the
+    # query and the session's FIRST message (the issue statement lives at the
+    # trajectory head, in the vocabulary queries are written in); F2, how much
+    # of the query's rare vocabulary the session's pooled chunks cover as a
+    # union — invisible to the per-chunk max. Offline replay: 0.4746 -> 0.535
+    # macro. Off by default; measured on all three instruments before judging.
+    session_feature_fusion: bool = False
     # Cap on distinct sessions in one payload. 0 means unlimited, which was the
     # earlier default. Tightening it to 2 is the companion move to the cap
     # increase above: with fewer sessions competing for the token prefix,
@@ -533,6 +541,7 @@ class Settings:
         put("llm_enabled", _env_bool("CODEMEM_LLM_ENABLED", False))
         put("card_enabled", _env_bool("CODEMEM_CARDS", False))
         put("session_score_topk", _env_int("CODEMEM_SESSION_SCORE_TOPK", 1))
+        put("session_feature_fusion", _env_bool("CODEMEM_SESSION_FEATURE_FUSION", False))
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))

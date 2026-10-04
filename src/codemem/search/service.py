@@ -21,6 +21,7 @@ from .evidence import (
     _select_span,
     assemble,
     score_candidates,
+    session_terms,
 )
 from .query import plan_query
 from .retriever import Retriever
@@ -100,6 +101,8 @@ class SearchPipeline:
         # text is ever returned (see the module docstring).
         reranked = self._listwise_rerank(plan, reranked, memories)
 
+        session_features = self._session_features(user_id, plan, reranked, memories, query)
+
         items = assemble(
             self.settings,
             self.store,
@@ -108,6 +111,7 @@ class SearchPipeline:
             reranked,
             memories,
             top_k=limit,
+            session_features=session_features,
         )
         items = self._dense_fill(user_id, plan, candidates, memories, items)
 
@@ -126,6 +130,77 @@ class SearchPipeline:
             },
         )
         return items
+
+    def _session_features(
+        self,
+        user_id: str,
+        plan: QueryPlan,
+        reranked: list,
+        memories: dict,
+        query: str,
+    ) -> tuple[dict[str, float], dict[str, float]] | None:
+        """The two session-level signals for the rank fusion, or None.
+
+        F1: cosine between the query and each candidate session's FIRST raw
+        message — the issue statement lives at the trajectory head, written in
+        the vocabulary an issue-like query uses, while the chunks that carry
+        the session's score are in tool vocabulary. F2: how much of the
+        query's rare vocabulary (terms covered by at most two candidate
+        sessions) the session's pooled chunks cover as a union — invisible to
+        the per-chunk max the session score uses. Costs one embed call over
+        the candidate sessions' first messages; never raises.
+        """
+        if not self.settings.session_feature_fusion:
+            return None
+        try:
+            order: list[str] = []
+            members: dict[str, list] = {}
+            for cand in reranked:
+                memory = memories.get(cand.memory_id)
+                if memory is None:
+                    continue
+                if memory.session_id not in members:
+                    order.append(memory.session_id)
+                    members[memory.session_id] = []
+                members[memory.session_id].append(memory)
+            order = order[:40]
+            if not order:
+                return None
+
+            f1: dict[str, float] = {sid: 0.0 for sid in order}
+            embedder = self.retriever.embedder
+            if embedder is not None and embedder.available:
+                firsts = self.store.first_messages(user_id, order)
+                live = [sid for sid in order if firsts.get(sid)]
+                vectors = embedder.embed([query] + [firsts[sid] for sid in live]) or []
+                if vectors and len(vectors) == len(live) + 1:
+                    qvec = vectors[0]
+                    for sid, svec in zip(live, vectors[1:]):
+                        if len(qvec) == len(svec):
+                            f1[sid] = sum(a * b for a, b in zip(qvec, svec))
+
+            query_terms = session_terms(query)
+            unions = {
+                sid: set().union(*(session_terms(m.text) for m in members[sid]))
+                if members[sid]
+                else set()
+                for sid in order
+            }
+            rare = {
+                t for t in query_terms
+                if sum(1 for sid in order if t in unions[sid]) <= 2
+            }
+            rare_cov = {
+                sid: (len(unions[sid] & rare) / len(rare) if rare else 0.0)
+                for sid in order
+            }
+            return f1, rare_cov
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "session features skipped",
+                extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
+            return None
 
     def _dense_fill(
         self,

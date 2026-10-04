@@ -558,6 +558,14 @@ def _position_ordered(
     return sorted(group, key=adjusted, reverse=True)
 
 
+def session_terms(text: str) -> set[str]:
+    """Words and identifiers long enough to carry topic, for session-level
+    union coverage (the F2 signal in the session-feature fusion)."""
+    return {
+        t for t in re.findall(r"[A-Za-z_][A-Za-z0-9_\.]+", text or "") if len(t) >= 4
+    }
+
+
 def assemble(
     settings: Settings,
     store: Store,
@@ -567,6 +575,7 @@ def assemble(
     memories: dict[int, MemoryRow],
     *,
     top_k: int,
+    session_features: tuple[dict[str, float], dict[str, float]] | None = None,
 ) -> list[EvidenceItem]:
     """Build the ranked ``data`` payload, respecting gates and token budget.
 
@@ -610,6 +619,31 @@ def assemble(
     # Row ids run in message order within a session, so (id - lo) / (hi - lo) is
     # the candidate's position in its own trajectory. One query, not one per
     # session: this runs on every search.
+    #
+    # Session-feature fusion (eval/README.md): when enabled, two session-level
+    # signals computed by the service — F1 (query vs the session's first
+    # message) and F2 (rare-vocabulary union coverage) — are rank-fused into
+    # the session order. Weights 2.0/2.0 sit in the middle of the offline
+    # replay's plateau (0.4746 -> 0.535 macro); the noise gate below still
+    # reads the head, so a session the features elevate must still clear it.
+    if settings.session_feature_fusion and session_features:
+        f1, rare_cov = session_features
+        head_rank = {sid: i for i, sid in enumerate(order)}
+        f1_rank = {
+            sid: i for i, sid in enumerate(sorted(order, key=lambda s: -f1.get(s, 0.0)))
+        }
+        rare_rank = {
+            sid: i for i, sid in enumerate(
+                sorted(order, key=lambda s: -rare_cov.get(s, 0.0))
+            )
+        }
+        fused = {
+            sid: 1.0 / (60 + head_rank.get(sid, 99))
+            + 2.0 / (60 + f1_rank.get(sid, 99))
+            + 2.0 / (60 + rare_rank.get(sid, 99))
+            for sid in order
+        }
+        order.sort(key=lambda sid: -fused.get(sid, 0.0))
     #
     # Session score. The shipped estimator is the max over the session's
     # admitted members (the head). ``session_score_topk`` > 1 replaces it with
