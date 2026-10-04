@@ -1458,10 +1458,34 @@ The session-ranking campaign is measured to completion. Select-llm is the
 champion on both the proxy (MRR +0.107, p<0.001) and the answer metric
 (+0.052 over shipped, the largest single-arm gain, n.s. at n=58); fusion is
 significant on the proxy and the reach leader on its own; neither stack
-improves on select alone. All three levers stay flags, defaults unchanged —
-the ship decision among {gate 0.45, fusion, select-llm} belongs to the
-deployment smoke window, with `docs/SUBMISSION.md` holding the trade-off
-tables.
+improves on select alone. All three levers stay flags. The ship decision
+was taken on 2026-10-04 (`docs/SUBMISSION.md` §2): `session_select_llm` is
+the deployment default (19cc935, fail-safe — every relay failure mode
+degrades to the shipped ordering), confirmed by the pre-registered run
+(0.414 reproduced to the question, zero discordant pairs — the
+confirmation section above); `dense_eligible@0.45` is the smoke-window A/B arm; fusion and
+top-k mass stay off as documented levers.
+
+### The algorithmic frontier map (closing the campaign, 2026-10-04)
+
+From the miss-diagnosis replay (`select_miss_diagnosis.json`), the remaining
+headroom on the memory-dependent instrument, as a ladder:
+
+| rung | answer accuracy | what it takes |
+|---|---|---|
+| **now** (select-llm) | **0.414** | frozen deployment default |
+| perfect LLM judgment over current shortlists | 0.655 | summary quality — the 11 judgment misses; issue-language card territory |
+| + perfect shortlists | 0.828 | reach — the 20 shortlist-bottleneck misses; card-in-pool / dense-recall territory |
+| beyond 0.828 | — | the 14 questions (24 %) whose answer session never reaches the payload even with the budget lifted: structural recall, not ordering |
+
+Rungs 2 and 3 are why the card is parked rather than dead: both are
+mechanically reachable, and both were shown this session to be **hard to
+convert** (the judge is non-monotone in shortlist composition; reach without
+discrimination is RAG's failure mode). The instrument ceiling (n=58, ±2–3
+questions) sits below the first rung's expected effect size. That is the
+precise sense in which algorithm work pauses here: not out of ideas, but
+because every further rung needs either a bigger instrument or the
+platform's own feedback to be judged at all.
 
 ### Assembly: sessions rank, chunks are evidence
 
