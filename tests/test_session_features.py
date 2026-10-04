@@ -109,3 +109,58 @@ def test_session_terms_requires_topic_length():
     assert "quota" in session_terms("quota retry backoff handler")
     assert "a" not in session_terms("a b c quota")
     assert session_terms("") == set()
+
+
+def test_llm_select_reorders_sessions(monkeypatch, tmp_path):
+    """The LLM selection stage reorders session blocks and the assembler
+    accepts it. Guards the wiring end to end with a stubbed relay — this
+    path failed silently twice before (missing import, stale closure name),
+    so the test runs against the real handle() pipeline."""
+    import logging
+
+    from codemem.api.app import create_app
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        dense_enabled=False,
+        rerank_enabled=False,
+        min_evidence_score=0.0,
+        session_select_llm=True,
+        llm_base_url="http://relay.test",
+        llm_api_key="stub",
+    )
+    app = create_app(settings)
+
+    def stub_chat(self, system: str, user: str) -> str:
+        return "2 and 1"  # pick the second-listed session first
+
+    from codemem.search.service import SearchPipeline
+
+    monkeypatch.setattr(SearchPipeline, "_chat", stub_chat)
+    logging.disable(logging.WARNING)
+    with TestClient(app) as client:
+        for sid, rid, body in (
+            ("strong", "r1", "quota retry backoff handler quota retry backoff handler: lock fixed src/a.py"),
+            ("bridge", "r2", "quota retry backoff handler part one; calendar timezone migration notes src/b.py"),
+        ):
+            client.post("/add", json={
+                "request_id": rid, "user_id": "u1", "session_id": sid,
+                "messages": [{"role": "user", "timestamp": 1, "content": body}],
+            })
+        response = client.post("/search", json={
+            "query": "quota retry backoff handler", "user_id": "u1", "top_k": 10,
+        })
+        items = response.json()["data"]
+        assert items
+        store = client.app.state.container.store
+        memory_ids = [int(i["id"].split("_")[1]) for i in items]
+        sessions = store.session_map("u1", memory_ids)
+        order = []
+        for mid in memory_ids:
+            sid = sessions.get(mid)
+            if sid and sid not in order:
+                order.append(sid)
+        assert set(order) == {"strong", "bridge"}
+        assert order[0] == "bridge", (
+            "the stubbed LLM picked 'bridge' first; handle() must honour it"
+        )

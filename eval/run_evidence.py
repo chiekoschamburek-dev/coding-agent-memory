@@ -384,6 +384,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cards", action="store_true",
                         help="enable L3 experience cards (one overview per "
                              "session, scored but never emitted)")
+    parser.add_argument("--session-select-llm", action="store_true",
+                        help="two-stage session selection: one gpt-4o-mini "
+                             "call picks the two sessions that record the "
+                             "cause/fix from compact summaries")
     parser.add_argument("--session-feature-fusion", action="store_true",
                         help="rank-fuse two session-level signals into the "
                              "session order")
@@ -446,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_score_topk"] = args.session_score_topk
     if getattr(args, "session_feature_fusion", False):
         overrides["session_feature_fusion"] = True
+    if getattr(args, "session_select_llm", False):
+        overrides["session_select_llm"] = True
     if args.max_sessions is not None:
         overrides["evidence_max_sessions"] = args.max_sessions
     if args.cap is not None:

@@ -446,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="enable L3 experience cards (one overview per "
                              "session, scored but never emitted); spends one "
                              "LLM call per Add")
+    parser.add_argument("--session-select-llm", action="store_true",
+                        help="two-stage session selection: one gpt-4o-mini "
+                             "call picks the two sessions that record the "
+                             "cause/fix from compact summaries")
     parser.add_argument("--session-feature-fusion", action="store_true",
                         help="rank-fuse two session-level signals into the "
                              "session order")
@@ -513,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_score_topk"] = args.session_score_topk
     if getattr(args, "session_feature_fusion", False):
         overrides["session_feature_fusion"] = True
+    if getattr(args, "session_select_llm", False):
+        overrides["session_select_llm"] = True
     if args.dense_enabled is not None:
         overrides["dense_enabled"] = args.dense_enabled.lower() == "true"
     if args.rerank_enabled is not None:

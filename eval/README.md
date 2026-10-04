@@ -1352,6 +1352,42 @@ type is flat — reaching more answer sessions did not convert into answers,
 which is precisely the question path 2 (LLM two-stage selection) is designed
 to test, now with better material to select from.
 
+### Path 2: LLM two-stage session selection — the best answer accuracy measured (2026-10-04)
+
+`session_select_llm`. The gate and the budget are untouched; what changes is
+**who decides the top-2**: the top ~8 candidate sessions are summarised
+(first message + files + two top chunks) and one `gpt-4o-mini` call picks the
+two that record the cause or fix — the same judgement the platform's Answer
+model makes, made over session-level summaries. This is not the failed
+listwise stage: that scored single chunks with no session boundary in view;
+this compares sessions as units, and its preference is structurally aligned
+with the graded metric. It takes precedence over feature fusion when it
+succeeds and degrades to the shipped order on any relay failure (zero
+failures across 89 searches + 290 answer calls).
+
+| instrument | shipped | select-llm | paired |
+|---|---|---|---|
+| proxy, session MRR (89 q) | 0.7584 | **0.8652** | **+0.107, p<0.001** — the largest MRR gain measured |
+| proxy, session recall@10 | 0.4746 | 0.5171 | +0.043, p=0.035 |
+| proxy, entry precision@10 | 0.5361 | 0.5951 | +0.059, p=0.039 |
+| procedure e2e accuracy (58 q × 5) | 0.362 | **0.414** | **+4/−1, +0.052, p=0.375** |
+| procedure e2e, answer session shown | 34.5 % | 46.6 % | +12.1 pp (same reach as fusion) |
+
+Procedure-e2e leaderboard after all three roads: RAG 0.224 < prior 0.328 <
+shipped 0.362 ≈ feature-fusion 0.345 < gate 0.397 < **select-llm 0.414**.
+Both ranking levers are significant on the proxy; the selection stage is the
+only one that also moves answer accuracy (+0.052, direction consistent with
+its proxy gains, not significant at n=58). Costs: one LLM call per search
+(~1 s with the relay, the same model the rules fix for the graded path) and
+a relay dependency the shipped configuration does not have — the flag stays
+off by default, and the deployment decision between {gate 0.45, select-llm,
+both} is deferred to the smoke window. Path 3 (the HyDE card campaign) is
+**affirmed as worth doing by path 2's result** — the LLM demonstrably picks
+the right sessions from summaries — but deferred: path 2 already delivers
+the judgement per-query at Search time, and the card's remaining advantage
+(pushing the judgement to Add time permanently, no Search-side relay) does
+not outweigh a 30-minute LLM campaign per instrument run before deployment.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

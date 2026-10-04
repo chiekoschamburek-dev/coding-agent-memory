@@ -376,6 +376,10 @@ def main(argv: list[str] | None = None) -> int:
                              "overview per session, scored but never emitted. "
                              "Requires CODEMEM_LLM_BASE_URL / _API_KEY / "
                              "_MODEL and spends one LLM call per Add")
+    parser.add_argument("--session-select-llm", action="store_true",
+                        help="two-stage session selection: one gpt-4o-mini "
+                             "call picks the two sessions that record the "
+                             "cause/fix from compact summaries")
     parser.add_argument("--session-feature-fusion", action="store_true",
                         help="rank-fuse two session-level signals (query vs "
                              "first message; rare-vocabulary union coverage) "
@@ -398,9 +402,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     overrides: dict = {}
-    if args.cards:
-        # Cards need the relay credentials, which live in .env; the benchmark
-        # otherwise builds Settings directly and never reads the environment.
+    if args.cards or args.session_select_llm or getattr(args, "session_feature_fusion", False):
+        # Stages that call the relay need its credentials, which live in
+        # .env; the benchmark otherwise builds Settings directly and never
+        # reads the environment.
         import os
 
         env_file = Path(".env")
@@ -478,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_score_topk"] = args.session_score_topk
     if getattr(args, "session_feature_fusion", False):
         overrides["session_feature_fusion"] = True
+    if getattr(args, "session_select_llm", False):
+        overrides["session_select_llm"] = True
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

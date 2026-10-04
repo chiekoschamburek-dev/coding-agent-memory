@@ -148,6 +148,14 @@ class Settings:
     # union — invisible to the per-chunk max. Offline replay: 0.4746 -> 0.535
     # macro. Off by default; measured on all three instruments before judging.
     session_feature_fusion: bool = False
+    # Two-stage session selection: the top ~8 candidate sessions are
+    # summarised (first message + files + top chunks) and one gpt-4o-mini
+    # call picks the two that record the cause or fix — the same judgement
+    # the platform's Answer model makes ("can this context answer this
+    # question"), made over session-level summaries rather than single
+    # chunks (what the failed listwise stage scored). Takes precedence over
+    # session_feature_fusion when it succeeds. Off by default.
+    session_select_llm: bool = False
     # Cap on distinct sessions in one payload. 0 means unlimited, which was the
     # earlier default. Tightening it to 2 is the companion move to the cap
     # increase above: with fewer sessions competing for the token prefix,
@@ -542,6 +550,7 @@ class Settings:
         put("card_enabled", _env_bool("CODEMEM_CARDS", False))
         put("session_score_topk", _env_int("CODEMEM_SESSION_SCORE_TOPK", 1))
         put("session_feature_fusion", _env_bool("CODEMEM_SESSION_FEATURE_FUSION", False))
+        put("session_select_llm", _env_bool("CODEMEM_SESSION_SELECT_LLM", False))
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", _env_str("CODEMEM_LLM_BASE_URL", None))
         put("llm_api_key", _env_str("CODEMEM_LLM_API_KEY", None))

@@ -8,6 +8,7 @@ it never writes text that is returned to the platform.
 
 from __future__ import annotations
 
+import re
 import time
 
 from ..core.config import Settings
@@ -101,7 +102,29 @@ class SearchPipeline:
         # text is ever returned (see the module docstring).
         reranked = self._listwise_rerank(plan, reranked, memories)
 
-        session_features = self._session_features(user_id, plan, reranked, memories, query)
+        select_order = (
+            self._llm_select_sessions(user_id, plan, reranked, memories, query)
+            if self.settings.session_select_llm else None
+        )
+        if select_order:
+            # The LLM picked the two sessions that record the cause or fix;
+            # their blocks go first (in its preference order) and the
+            # assembler runs unchanged — the noise gate still applies to every
+            # session and the per-session caps are untouched. Fusion is
+            # skipped when the selection succeeded: one stage must own the
+            # ordering.
+            block = {sid: i for i, sid in enumerate(select_order)}
+            pos = {id(c): i for i, c in enumerate(reranked)}
+
+            def _sel_rank(cand):
+                memory = memories.get(cand.memory_id)
+                sid = memory.session_id if memory else None
+                return (block.get(sid, len(block) + pos[id(cand)]), pos[id(cand)])
+
+            reranked = sorted(reranked, key=_sel_rank)
+            session_features = None
+        else:
+            session_features = self._session_features(user_id, plan, reranked, memories, query)
 
         items = assemble(
             self.settings,
@@ -199,6 +222,117 @@ class SearchPipeline:
             log.warning(
                 "session features skipped",
                 extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
+            return None
+
+    _SELECT_SYSTEM = (
+        "You select which past engineering sessions recorded the cause or the "
+        "fix of a described problem. Reply with exactly two numbers."
+    )
+
+    def _llm_select_sessions(
+        self,
+        user_id: str,
+        plan: QueryPlan,
+        reranked: list,
+        memories: dict,
+        query: str,
+    ) -> list[str] | None:
+        """One LLM call over compact session summaries; never raises.
+
+        Returns the two chosen session ids in preference order, or None when
+        the relay fails or the reply does not parse — the caller then keeps
+        the shipped ordering. The judgement is the one the platform's Answer
+        model makes ("can this context answer this question"), made over
+        session-level summaries rather than the single chunks the failed
+        listwise stage scored.
+        """
+        if not self.settings.llm_base_url or not self.settings.llm_api_key:
+            return None
+        try:
+            order: list[str] = []
+            members: dict[str, list] = {}
+            for cand in reranked:
+                memory = memories.get(cand.memory_id)
+                if memory is None:
+                    continue
+                if memory.session_id not in members:
+                    order.append(memory.session_id)
+                    members[memory.session_id] = []
+                members[memory.session_id].append(memory)
+            order = order[:8]
+            if len(order) < 2:
+                return None
+
+            firsts = self.store.first_messages(user_id, order)
+            blocks = []
+            for i, sid in enumerate(order, start=1):
+                texts = [m.text for m in members[sid]]
+                files = sorted({
+                    f for t in texts
+                    for f in re.findall(r"[\w/\\.-]+\.\w{1,4}\b", t)
+                })[:6]
+                top_chunks = sorted(texts, key=lambda t: -len(t))[:2]
+                opening = (firsts.get(sid) or texts[0] if texts else "")[:280]
+                blocks.append(
+                    f"[{i}] files: {', '.join(files) if files else '(none)'}\n"
+                    f"    opening: {opening}\n"
+                    + "\n".join(f"    chunk: {t[:200]}" for t in top_chunks)
+                )
+            user = (
+                "Problem / issue:\n" + query[:800] + "\n\n"
+                "Candidate sessions:\n" + "\n".join(blocks) + "\n\n"
+                "Which TWO sessions record the cause or the fix of this "
+                "problem? Reply with the two numbers."
+            )
+            reply = self._chat(self._SELECT_SYSTEM, user)
+            if not reply:
+                return None
+            numbers = [int(n) for n in re.findall(r"\d+", reply)]
+            picked = [order[n - 1] for n in numbers if 1 <= n <= len(order)]
+            picked = list(dict.fromkeys(picked))[:2]
+            if len(picked) < 2:
+                return None
+            log.info(
+                "session selection",
+                extra={"ctx": {
+                    "user_id": user_id,
+                    "picked": [p[:12] for p in picked],
+                    "baseline_head": order[0][:12],
+                }},
+            )
+            return picked
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "session selection failed",
+                extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
+            return None
+
+    def _chat(self, system: str, user: str) -> str | None:
+        """One chat completion against the configured relay. Never raises."""
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(
+                base_url=self.settings.llm_base_url,
+                api_key=self.settings.llm_api_key,
+                timeout=self.settings.llm_timeout_seconds,
+            )
+            response = client.chat.completions.create(
+                model=self.settings.llm_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0,
+                max_tokens=24,
+            )
+            return response.choices[0].message.content
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "selection LLM call failed",
+                extra={"ctx": {"error": str(exc)[:200]}},
             )
             return None
 
