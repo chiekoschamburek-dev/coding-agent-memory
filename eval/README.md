@@ -1297,6 +1297,21 @@ cannot price payload usefulness — the same asymmetry documented for the
 entry-order rejection. Default stays 1; top-2 is recorded as the best
 measured ranking candidate alongside `dense_eligible@0.45`.
 
+**The combination cell (gate 0.45 + top-2) was measured and the levers do
+not stack on answer accuracy.** Proxy (89 q): the combination is the best
+ranking configuration on record — session recall@10 0.5013 (p=0.012 vs
+baseline), and significantly above the gate alone (session MRR +0.034,
+p=0.003; entry recall +0.028, p=0.003), with precision unchanged. Evidence
+metric (30 q): decidable flat, payload −12 %. Procedure e2e (58 q × 5):
+combo 0.379 = top-2 alone, −1 question vs the gate alone (p=1.0 everywhere);
+answer-session reach 37.9 %. Leaderboard on the memory-dependent instrument:
+RAG 0.224 < prior 0.328 < shipped 0.362 < top-2 = combo 0.379 < **gate alone
+0.397** — every gap ≤ 2 questions. The two levers act on different stages
+(admission vs ordering) and stack measurably on the file-overlap proxy, but
+on answer accuracy they are within noise of one another; the ship decision
+between {gate, top-2, combo} stays open pending a larger instrument, and the
+default configuration stays unchanged.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
