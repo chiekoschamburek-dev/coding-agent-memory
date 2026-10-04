@@ -1388,6 +1388,36 @@ the judgement per-query at Search time, and the card's remaining advantage
 (pushing the judgement to Add time permanently, no Search-side relay) does
 not outweigh a 30-minute LLM campaign per instrument run before deployment.
 
+### Why select-llm still missed 53.4%: the zero-relay decomposition (2026-10-04)
+
+`scripts/diagnose_select_miss.py`. Before any stacking run, the 31 misses of
+the select-llm arm were replayed offline (one Add, one local embed pass, zero
+relay calls; the arm's per-question reach joins from the recorded dump):
+
+| bucket | n | meaning |
+|---|---|---|
+| **shortlist-bottleneck** | **20 (65 %)** | the answer session was outside the top-8 the LLM saw |
+| gate-blocked | 0 | no shortlisted session was ever gate-killed |
+| llm-judgment | 11 | shortlisted and admissible, not picked |
+
+Three decisions fall straight out:
+
+1. **gate + select stacking is dead**: with zero gate-blocked misses, the
+   gate cannot rescue any select-llm miss directly; its only path would be
+   reshuffling shortlist membership, which is exactly what fusion already
+   does measurably better.
+2. **fusion is not redundant — it is the shortlist feeder.** The identical
+   +12.1 pp reach was an aggregation coincidence: fusion fixes 6 queries
+   select misses, select fixes 12 fusion misses, only 2 overlap. Of the 20
+   shortlist-bottleneck misses, the answer session surfaces in the fusion
+   payload for 6 (all admissible) — so **fusion-feeding-select has a
+   measured ceiling of ~6 questions (+10 pp)**, and a perfect shortlist
+   would rescue 10.
+3. **the one stacking run worth its 58×5 is fusion + select**, expected
+   yield 3–6 questions — at or above the instrument's resolution for the
+   first time, with the expected value known before running. The remaining
+   11 llm-judgment misses are summary quality — parked-card territory.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
