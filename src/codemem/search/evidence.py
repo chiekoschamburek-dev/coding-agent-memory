@@ -566,6 +566,34 @@ def session_terms(text: str) -> set[str]:
     }
 
 
+def fused_session_order(
+    order: list[str], f1: dict[str, float], rare_cov: dict[str, float]
+) -> list[str]:
+    """Rank-fuse the head order with the two session-feature signals.
+
+    Weights 2.0/2.0 sit in the interior of the offline replay's plateau
+    (eval/README.md, the session-feature section). Shared by ``assemble``
+    and the service, so the fusion feeding the LLM shortlist and the fusion
+    applied at assembly are the same computation.
+    """
+    head_rank = {sid: i for i, sid in enumerate(order)}
+    f1_rank = {
+        sid: i for i, sid in enumerate(sorted(order, key=lambda s: -f1.get(s, 0.0)))
+    }
+    rare_rank = {
+        sid: i for i, sid in enumerate(
+            sorted(order, key=lambda s: -rare_cov.get(s, 0.0))
+        )
+    }
+    fused = {
+        sid: 1.0 / (60 + head_rank.get(sid, 99))
+        + 2.0 / (60 + f1_rank.get(sid, 99))
+        + 2.0 / (60 + rare_rank.get(sid, 99))
+        for sid in order
+    }
+    return sorted(fused, key=lambda sid: -fused.get(sid, 0.0))
+
+
 def assemble(
     settings: Settings,
     store: Store,
@@ -628,22 +656,9 @@ def assemble(
     # reads the head, so a session the features elevate must still clear it.
     if settings.session_feature_fusion and session_features:
         f1, rare_cov = session_features
-        head_rank = {sid: i for i, sid in enumerate(order)}
-        f1_rank = {
-            sid: i for i, sid in enumerate(sorted(order, key=lambda s: -f1.get(s, 0.0)))
-        }
-        rare_rank = {
-            sid: i for i, sid in enumerate(
-                sorted(order, key=lambda s: -rare_cov.get(s, 0.0))
-            )
-        }
-        fused = {
-            sid: 1.0 / (60 + head_rank.get(sid, 99))
-            + 2.0 / (60 + f1_rank.get(sid, 99))
-            + 2.0 / (60 + rare_rank.get(sid, 99))
-            for sid in order
-        }
-        order.sort(key=lambda sid: -fused.get(sid, 0.0))
+        fused_order = fused_session_order(order, f1, rare_cov)
+        fused_pos = {sid: i for i, sid in enumerate(fused_order)}
+        order.sort(key=lambda sid: fused_pos.get(sid, len(fused_pos)))
     #
     # Session score. The shipped estimator is the max over the session's
     # admitted members (the head). ``session_score_topk`` > 1 replaces it with

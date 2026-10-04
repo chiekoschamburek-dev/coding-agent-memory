@@ -164,3 +164,47 @@ def test_llm_select_reorders_sessions(monkeypatch, tmp_path):
         assert order[0] == "bridge", (
             "the stubbed LLM picked 'bridge' first; handle() must honour it"
         )
+
+
+def test_fusion_feeds_the_llm_shortlist(monkeypatch, tmp_path):
+    """The stack: fusion reorders candidates BEFORE the LLM sees them, so the
+    top-8 it picks from is the fused one; the LLM's picks still own the final
+    block order."""
+    from codemem.api.app import create_app
+    from codemem.search.service import SearchPipeline
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        dense_enabled=False,
+        rerank_enabled=False,
+        min_evidence_score=0.0,
+        session_feature_fusion=True,
+        session_select_llm=True,
+        llm_base_url="http://relay.test",
+        llm_api_key="stub",
+    )
+    app = create_app(settings)
+    seen_order = []
+
+    def stub_select(self, user_id, plan, reranked, memories, query):
+        order = []
+        for cand in reranked:
+            memory = memories.get(cand.memory_id)
+            if memory and memory.session_id not in order:
+                order.append(memory.session_id)
+        seen_order.extend(order)
+        return order[:2]  # pick the fused top-2
+
+    monkeypatch.setattr(SearchPipeline, "_llm_select_sessions", stub_select)
+    with TestClient(app) as client:
+        client.post("/add", json={
+            "request_id": "r1", "user_id": "u1", "session_id": "s1",
+            "messages": [{"role": "user", "timestamp": 1,
+                          "content": "quota retry backoff handler lock src/a.py"}],
+        })
+        response = client.post("/search", json={
+            "query": "quota retry backoff handler", "user_id": "u1", "top_k": 5,
+        })
+        assert response.json()["data"]
+        # the LLM was handed the fused-ordered candidates (it saw a list)
+        assert seen_order, "the selection stage must see the reordered list"

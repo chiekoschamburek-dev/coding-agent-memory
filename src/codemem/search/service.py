@@ -23,11 +23,30 @@ from .evidence import (
     assemble,
     score_candidates,
     session_terms,
+    fused_session_order,
 )
 from .query import plan_query
 from .retriever import Retriever
 
 log = get_logger("codemem.search")
+
+
+def _ordered_blocks(reranked, memories, ordering, rest_after=None):
+    """Sort candidates by session-block order, first appearance preserved
+    within a block. Sessions absent from ``ordering`` follow, in their
+    relative order. (``rest_after`` is accepted for call-site readability;
+    absent sessions already sort after every listed one.)"""
+    block = {sid: i for i, sid in enumerate(ordering)}
+    pos = {id(c): i for i, c in enumerate(reranked)}
+
+    def key(cand):
+        memory = memories.get(cand.memory_id)
+        sid = memory.session_id if memory else None
+        if sid in block:
+            return (block[sid], pos[id(cand)])
+        return (len(block) + pos[id(cand)], pos[id(cand)])
+
+    return sorted(reranked, key=key)
 
 
 class SearchPipeline:
@@ -102,6 +121,28 @@ class SearchPipeline:
         # text is ever returned (see the module docstring).
         reranked = self._listwise_rerank(plan, reranked, memories)
 
+        # Fusion feeds the shortlist: when enabled, the fused ordering is
+        # applied to the reranked list FIRST, so the LLM's top-8 — and the
+        # fallback order — are the fused ones (the diagnostic measured 20 of
+        # 31 select-llm misses as shortlist-bottleneck). One stage owns the
+        # final ordering: the LLM's picks when it succeeds, the fused order
+        # otherwise.
+        session_features = (
+            self._session_features(user_id, plan, reranked, memories, query)
+            if self.settings.session_feature_fusion else None
+        )
+        if session_features is not None:
+            f1, rare_cov = session_features
+            head_order: list[str] = []
+            for cand in reranked:
+                memory = memories.get(cand.memory_id)
+                sid = memory.session_id if memory else None
+                if sid and sid not in head_order:
+                    head_order.append(sid)
+            fused_order = fused_session_order(head_order, f1, rare_cov)
+            reranked = _ordered_blocks(reranked, memories, fused_order)
+            session_features = None  # applied; assemble must not re-fuse
+
         select_order = (
             self._llm_select_sessions(user_id, plan, reranked, memories, query)
             if self.settings.session_select_llm else None
@@ -110,21 +151,8 @@ class SearchPipeline:
             # The LLM picked the two sessions that record the cause or fix;
             # their blocks go first (in its preference order) and the
             # assembler runs unchanged — the noise gate still applies to every
-            # session and the per-session caps are untouched. Fusion is
-            # skipped when the selection succeeded: one stage must own the
-            # ordering.
-            block = {sid: i for i, sid in enumerate(select_order)}
-            pos = {id(c): i for i, c in enumerate(reranked)}
-
-            def _sel_rank(cand):
-                memory = memories.get(cand.memory_id)
-                sid = memory.session_id if memory else None
-                return (block.get(sid, len(block) + pos[id(cand)]), pos[id(cand)])
-
-            reranked = sorted(reranked, key=_sel_rank)
-            session_features = None
-        else:
-            session_features = self._session_features(user_id, plan, reranked, memories, query)
+            # session and the per-session caps are untouched.
+            reranked = _ordered_blocks(reranked, memories, select_order, rest_after=len(select_order))
 
         items = assemble(
             self.settings,
