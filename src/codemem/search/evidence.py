@@ -566,6 +566,44 @@ def session_terms(text: str) -> set[str]:
     }
 
 
+def _query_ordered(
+    group: list[Candidate],
+    memories: dict[int, MemoryRow],
+    source_of: dict[int, str],
+    keywords: Sequence[str],
+    weight: float,
+) -> list[Candidate]:
+    """Re-order one session's candidates by query-keyword coverage.
+
+    Intra-session, like the position tilt: session membership is already
+    fixed, so this only decides which chunk of an admitted session the
+    answer model reads first. The lift is multiplicative and bounded —
+    full coverage can at most double a chunk's tilted score — so a sibling
+    cannot jump past one that dominates it on ``final``. Zero-weight is the
+    shipped behaviour.
+    """
+    if weight <= 0 or not keywords:
+        return group
+    want = {k.lower() for k in keywords}
+    if not want:
+        return group
+
+    def coverage(cand: Candidate) -> float:
+        text = (source_of.get(cand.memory_id) or "").lower()
+        return sum(1 for k in want if k in text) / len(want)
+
+    if weight >= 99:
+        # coverage-primary: final only breaks ties. The extreme form of the
+        # lever — tests whether ANY ordering by query coverage can surface
+        # the decisive content when bounded lifts cannot.
+        return sorted(group, key=lambda c: (coverage(c), c.final), reverse=True)
+
+    def lifted(cand: Candidate) -> float:
+        return cand.final * (1.0 + weight * coverage(cand))
+
+    return sorted(group, key=lifted, reverse=True)
+
+
 def fused_session_order(
     order: list[str], f1: dict[str, float], rare_cov: dict[str, float]
 ) -> list[str]:
@@ -717,6 +755,12 @@ def assemble(
         promote = settings.evidence_operative_promotion
         if promote < 0 or session_index < promote:
             group = _role_ordered(group, source_of)
+
+        if settings.intra_session_order_weight > 0:
+            group = _query_ordered(
+                group, memories, source_of, plan.keywords,
+                settings.intra_session_order_weight,
+            )
 
         taken = 0
         for cand in group:

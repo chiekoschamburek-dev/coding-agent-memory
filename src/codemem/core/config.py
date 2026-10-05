@@ -163,6 +163,14 @@ class Settings:
     # deterministic ordering is the never-below-floor default (eval/
     # README.md, the claim-instrument section). One env flip re-enables.
     session_select_llm: bool = False
+    # Intra-session emission order: lift a chunk's (position-tilted) score by
+    # its coverage of the query's own keywords — final × (1 + w × coverage).
+    # Within-session and additive-only by construction: it cannot change which
+    # sessions emit, only the order their chunks take and thus which content
+    # the answer model reads first. Targets the measured failure that the
+    # menu is saturated (97.1 % top-8) while only 13.5 % of gold chunks are
+    # emitted: the head score picks sessions, not content. Off by default.
+    intra_session_order_weight: float = 0.0
     # Hard budget for the selection call. The relay answered in ~1 s when
     # healthy; 10 s bounds the tail so the fallback (shipped ordering) fires
     # well inside the platform's 30-minute Search ceiling while keeping
@@ -579,6 +587,10 @@ class Settings:
         put("session_score_topk", _env_int("CODEMEM_SESSION_SCORE_TOPK", 1))
         put("session_feature_fusion", _env_bool("CODEMEM_SESSION_FEATURE_FUSION", False))
         put("session_select_llm", _env_bool("CODEMEM_SESSION_SELECT_LLM", False))
+        put(
+            "intra_session_order_weight",
+            _env_float("CODEMEM_INTRA_SESSION_ORDER_WEIGHT", 0.0),
+        )
         put(
             "session_select_timeout_seconds",
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),

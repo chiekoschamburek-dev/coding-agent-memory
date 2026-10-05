@@ -1964,6 +1964,43 @@ direction-consistent, pooled-positive, and one question shy. On a leak-free
 adversarial instrument, denoising beats flooding decisively, but beating
 the prior outright remains an open — and honest — frontier.
 
+### Intra-session emission ordering: pre-registered gate failed; the frontier moves up-stream (2026-10-05)
+
+The "选对了 session、给错了内容" hypothesis, priced. `intra_session_order_weight`
+lifts a chunk's position-tilted score by its coverage of the query's keywords
+(`final × (1 + w × coverage)`, within-session only, fail-safe at 0) — plus a
+coverage-primary extreme (w=99: final only breaks ties). Metric: does the
+**gold claim arrive whole in the payload** (`claim_delivered`, the content-
+level test the claim questions were built for). Both plans, 70 q, zero relay:
+
+| w | bare | with_options |
+|---|---|---|
+| 0 (shipped) | 0/70 | 0/70 |
+| 0.5 / 1.0 / 2.0 | 1/70 | 0/70 |
+| 99 (coverage-primary) | 0/70 | 0/70 |
+
+Pre-registered gate (net ≥ +3 on BOTH plans): **failed decisively** — best
+case +1 on one plan. And the extreme form's zero is the informative number:
+even reordering each session's chunks by pure query coverage delivers
+nothing, because **the claim chunks are not in the assembler's hands**. The
+funnel for the claim memories themselves: pooled 11/70 (15.7 %), emitted
+0/70, their sessions in the payload 10/70 (14.3 %) — the intersection of
+"pooled" and "session emitted" is empty at this n.
+
+This falsifies the content-selection hypothesis and **collapses roadmap
+item #1 into item #3**: intra-session ordering was the wrong layer — the
+decisive content is not lost to ordering, it is lost to **recall/pooling**
+(the file/lexical/entity channels do not surface prose claims). The ladder
+reshapes accordingly: the 0.655 "perfect judgment" rung assumed delivered
+content to judge, and the 0.828 "perfect shortlist" rung must now include
+claim-content pooling — the multi-view session representation (issue-
+language, action-verb, and file-path views as separate cards at Add time)
+is the one remaining lever that attacks the pooling term directly.
+Implementation retained, default 0.0 (deterministic, harmless, useless
+alone — kept so the next pooling lever can be priced against it).
+(Measurement note: an earlier reach figure of 40/70 from this harness was
+a double-count across plans; bare-plan reach is 10/70, options-plan ~30/70.)
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

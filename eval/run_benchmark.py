@@ -376,6 +376,10 @@ def main(argv: list[str] | None = None) -> int:
                              "overview per session, scored but never emitted. "
                              "Requires CODEMEM_LLM_BASE_URL / _API_KEY / "
                              "_MODEL and spends one LLM call per Add")
+    parser.add_argument("--intra-session-order-weight", type=float, default=None,
+                        help="lift intra-session emission order by query-keyword "
+                             "coverage: final x (1 + w x coverage). Within-session "
+                             "only; cannot change which sessions emit")
     parser.add_argument("--session-select-llm", action="store_true",
                         help="two-stage session selection: one gpt-4o-mini "
                              "call picks the two sessions that record the "
@@ -485,6 +489,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_feature_fusion"] = True
     if getattr(args, "session_select_llm", False):
         overrides["session_select_llm"] = True
+    if getattr(args, "intra_session_order_weight", None) is not None:
+        overrides["intra_session_order_weight"] = args.intra_session_order_weight
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)
