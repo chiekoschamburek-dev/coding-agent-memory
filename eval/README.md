@@ -1718,7 +1718,41 @@ signal — the LTR's own recipe, testable only on instruments that can
 resolve it.
 
 
+### The claim-anchor funnel: channels saturated; the menu dies at ranking (2026-10-05)
+
+`scripts/claim_funnel.py` — where the 48/70 menu misses die, zero relay:
+
+| stage (shipped) | n/70 |
+|---|---|
+| in top-8 menu | 22 |
+| pooled, gated out (dense-visible only) | 11 |
+| pooled + admissible, ranked 9+ | **36** |
+| never pooled | **1** |
+
+Three levers priced at once. **Channels are saturated on both anchors**
+(94.3 % pooled on the file-overlap anchor, 69/70 here) — deepening recall
+is permanently dead, not just zero-sum. **`dense_eligible@0.45` is net
+zero on this anchor with churn**: it seats the gated bucket's 2 and
+promotes 5 rankers, but the entrants displace 7 currently-seated answer
+sessions — menu stays exactly 22/70, the non-monotonicity signature a
+third time (directional-but-never-significant on A, net-zero on B). The
+binding constraint is **session ranking under the current representation**:
+51 % of questions have the answer session admissible and visible, seated
+below nine others.
+
+What the surviving buckets imply: the gated 11 need a candidate that
+passes the lexical gate (a session document written in issue vocabulary
+is one by construction — its text is what BM25 matches); the rank9+ 36
+need a comparable session-level object or a better query representation.
+Both are the parked card's territory, and the LTR transfer finding
+(first-message cosine is the strongest anchor-agnostic signal) is its
+feature-level support. The Search-time cheap probe of the same hypothesis
+is query-side HyDE — the instrument builder itself is the existence
+proof that issue↔claim embedding affinity ≥ 0.55 carries anchor
+structure (it built 105 questions on it).
+
 ### The algorithmic frontier map (closing the campaign, 2026-10-04)
+
 
 
 From the miss-diagnosis replay (`select_miss_diagnosis.json`), the remaining
