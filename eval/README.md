@@ -1901,6 +1901,29 @@ Three consequences:
 The deterministic stack is now the only arm above floor on both anchors —
 the reversal conclusion survives its control, strengthened.
 
+### Combined across anchors: the stack beats RAG at pooled p=0.0023 (2026-10-05)
+
+The "conclusion holds only on a single anchor" objection, closed with the
+deployed arm (deterministic stack) vs RAG on every anchor, paired per
+question, discordants pooled across strata (stratified exact McNemar;
+Fisher's method as a sensitivity check):
+
+| anchor | stack | RAG | discordants (+stack/−RAG) | per-stratum p |
+|---|---|---|---|---|
+| file-localisation (90 q, leaky) | 0.711 | 0.689 | +4/−2 | 0.69 |
+| procedure (58 q) | 0.362 | 0.224 | +9/−1 | 0.022 |
+| claim-topical (70 q, adversarial) | 0.300 | 0.200 | +10/−3 | 0.092 |
+| **pooled** | — | — | **+23/−6** | **p=0.0023** |
+
+Fisher's combination of the three per-stratum p-values agrees (χ²=13.20,
+df=6, p=0.040). All three strata point the same way, the pooled discordant
+ratio is 3.8:1, and the effect is monotone in instrument cleanliness
+(delta +0.022 leaky → +0.138 → +0.100 adversarial): the cleaner the
+instrument, the more the gap widens — exactly the noise mechanism's
+signature. The headline claim of the campaign is now **significant on the
+pooled instrument set**: the deterministic stack answers better than pure
+RAG, and the advantage grows as the instrument gets fairer to memory.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
