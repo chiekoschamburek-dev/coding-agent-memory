@@ -75,9 +75,8 @@ def main() -> int:
                 "messages": memory["messages"],
             })
 
-        arms = {"shipped": 0, "f1": 0, "fused": 0}
-        pooled_hit = 0
-        pooled_total = 0
+        arms = {}
+        pooled_hit = {"bare": 0, "with_options": 0}
         n = 0
         for question in qa["questions"]:
             answer_session = question.get("answer_session")
@@ -89,94 +88,101 @@ def main() -> int:
                 if m["repo"] == question["repo"]
             )
             query = question["question"]
+            options = question.get("options") or []
 
-            plan = plan_query(query, None)
-            candidates = pipeline.retriever.recall(user_id, plan)
-            memories = pipeline.retriever.load(user_id, candidates)
-            chunk_scores = store.entity_match_scores(user_id, plan.entities)
-            entity_match = {}
-            for cand in candidates:
-                memory = memories.get(cand.memory_id)
-                if memory is None or memory.chunk_id is None:
-                    continue
-                score = chunk_scores.get(memory.chunk_id, 0.0)
-                if score > 0:
-                    entity_match[memory.id] = score
-            scored = score_candidates(
-                candidates, memories, plan, entity_match,
-                operative_weight=settings.operative_rank_weight,
-            )
-            reranked = pipeline._rerank(user_id, plan, scored, memories)  # noqa: SLF001
-
-            order: list[str] = []
-            members: dict[str, list] = {}
-            for cand in reranked:
-                memory = memories.get(cand.memory_id)
-                if memory is None:
-                    continue
-                if memory.session_id not in members:
-                    order.append(memory.session_id)
-                    members[memory.session_id] = []
-                members[memory.session_id].append(memory)
-
-            pooled = answer_session in members
-            pooled_total += 1
-            pooled_hit += 1 if pooled else 0
-
-            # F1: query vs each candidate session's first message
-            f1 = {sid: 0.0 for sid in order}
-            if embedder is not None and embedder.available:
-                firsts = store.first_messages(user_id, order)
-                live = [sid for sid in order if firsts.get(sid)]
-                vectors = embedder.embed([query] + [firsts[sid] for sid in live]) or []
-                if vectors and len(vectors) == len(live) + 1:
-                    qvec = vectors[0]
-                    for sid, svec in zip(live, vectors[1:]):
-                        if len(qvec) == len(svec):
-                            f1[sid] = sum(a * b for a, b in zip(qvec, svec))
-
-            f1_order = sorted(order, key=lambda s: -f1.get(s, 0.0))
-            fused_order = fused_session_order(order, f1, {s: 0.0 for s in order})
-
-            def payload(ordering: list[str]) -> list[str]:
-                block = {sid: i for i, sid in enumerate(ordering)}
-                pos = {id(c): i for i, c in enumerate(reranked)}
-
-                def block_of(cand):
+            plans = {
+                "bare": plan_query(query, None),
+                "with_options": plan_query(query, options),
+            }
+            pooled_hit.setdefault("bare", 0)
+            pooled_hit.setdefault("with_options", 0)
+            for plan_key, plan in plans.items():
+                candidates = pipeline.retriever.recall(user_id, plan)
+                memories = pipeline.retriever.load(user_id, candidates)
+                chunk_scores = store.entity_match_scores(user_id, plan.entities)
+                entity_match = {}
+                for cand in candidates:
                     memory = memories.get(cand.memory_id)
-                    return (
-                        block.get(memory.session_id, 99) if memory else 99,
-                        pos[id(cand)],
-                    )
-
-                items = assemble_ship(
-                    settings, store, user_id, plan,
-                    sorted(reranked, key=block_of), memories, top_k=100,
+                    if memory is None or memory.chunk_id is None:
+                        continue
+                    score = chunk_scores.get(memory.chunk_id, 0.0)
+                    if score > 0:
+                        entity_match[memory.id] = score
+                scored = score_candidates(
+                    candidates, memories, plan, entity_match,
+                    operative_weight=settings.operative_rank_weight,
                 )
-                seen: list[str] = []
-                for item in items:
-                    memory = memories.get(item.memory_id)
-                    if memory and memory.session_id not in seen:
-                        seen.append(memory.session_id)
-                return seen
+                reranked = pipeline._rerank(user_id, plan, scored, memories)  # noqa: SLF001
 
-            for name, ordering in (
-                ("shipped", order),
-                ("f1", f1_order),
-                ("fused", fused_order),
-            ):
-                top8 = ordering[:8]
-                arms[name] += 1 if (pooled and answer_session in top8) else 0
+                order: list[str] = []
+                members: dict[str, list] = {}
+                for cand in reranked:
+                    memory = memories.get(cand.memory_id)
+                    if memory is None:
+                        continue
+                    if memory.session_id not in members:
+                        order.append(memory.session_id)
+                        members[memory.session_id] = []
+                    members[memory.session_id].append(memory)
+
+                pooled = answer_session in members
+                pooled_hit[plan_key] += 1 if pooled else 0
+
+                # F1: query vs each candidate session's first message
+                f1 = {sid: 0.0 for sid in order}
+                if embedder is not None and embedder.available:
+                    firsts = store.first_messages(user_id, order)
+                    live = [sid for sid in order if firsts.get(sid)]
+                    vectors = embedder.embed([query] + [firsts[sid] for sid in live]) or []
+                    if vectors and len(vectors) == len(live) + 1:
+                        qvec = vectors[0]
+                        for sid, svec in zip(live, vectors[1:]):
+                            if len(qvec) == len(svec):
+                                f1[sid] = sum(a * b for a, b in zip(qvec, svec))
+
+                f1_order = sorted(order, key=lambda s: -f1.get(s, 0.0))
+                fused_order = fused_session_order(order, f1, {s: 0.0 for s in order})
+
+                def payload(ordering: list[str]) -> list[str]:
+                    block = {sid: i for i, sid in enumerate(ordering)}
+                    pos = {id(c): i for i, c in enumerate(reranked)}
+
+                    def block_of(cand):
+                        memory = memories.get(cand.memory_id)
+                        return (
+                            block.get(memory.session_id, 99) if memory else 99,
+                            pos[id(cand)],
+                        )
+
+                    items = assemble_ship(
+                        settings, store, user_id, plan,
+                        sorted(reranked, key=block_of), memories, top_k=100,
+                    )
+                    seen: list[str] = []
+                    for item in items:
+                        memory = memories.get(item.memory_id)
+                        if memory and memory.session_id not in seen:
+                            seen.append(memory.session_id)
+                    return seen
+
+                for name, ordering in (
+                    (f"{plan_key}/shipped", order),
+                    (f"{plan_key}/f1", f1_order),
+                    (f"{plan_key}/fused", fused_order),
+                ):
+                    top8 = ordering[:8]
+                    arms.setdefault(name, 0)
+                    arms[name] += 1 if (pooled and answer_session in top8) else 0
 
     client.__exit__(None, None, None)
 
     print(f"questions with an answer session: {n}")
-    print(f"answer-session pooling rate (in reranked list at all): "
-          f"{pooled_hit}/{n} = {pooled_hit / n:.3f}")
-    print(f"\ntop-8 shortlist hit rate (given pooled):")
-    print(f"  shipped order : {arms['shipped']}/{n} = {arms['shipped'] / n:.3f}")
-    print(f"  f1 order      : {arms['f1']}/{n} = {arms['f1'] / n:.3f}")
-    print(f"  fused order   : {arms['fused']}/{n} = {arms['fused'] / n:.3f}")
+    print(f"answer-session pooling rate: "
+          f"bare {pooled_hit['bare']}/{n} = {pooled_hit['bare'] / n:.3f} | "
+          f"with_options {pooled_hit['with_options']}/{n} = {pooled_hit['with_options'] / n:.3f}")
+    print("\ntop-8 shortlist hit rate (given pooled):")
+    for name, count in arms.items():
+        print(f"  {name:24s} {count}/{n} = {count / n:.3f}")
     return 0
 
 

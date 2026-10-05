@@ -1830,32 +1830,43 @@ precise sense in which algorithm work pauses here: not out of ideas, but
 because every further rung needs either a bigger instrument or the
 platform's own feedback to be judged at all.
 
-### F1 selection on the claim-topical anchor: the hypothesis lands (2026-10-05)
+### F1 selection on the claim-topical anchor: REVERSED by the options convention (2026-10-05)
 
-`scripts/claim_anchor_f1.py`, 70-question tuning set, zero relay calls. The
-opening-statement hypothesis — the gold session states its problem in
-query-like vocabulary while distractors state theirs — measured as a
-selection mechanism on the anchor where lexical matching is adversarially
-poisoned:
+`scripts/claim_anchor_f1.py`, 70-question tuning set, zero relay calls.
+First archived result (bare-question plans): shipped 31.4 % top-8 hit, F1
+selection 42.9 % (+11) — "the hypothesis lands". **Reversed within a day by
+its own options-aware re-run**, applying the same lesson the HyDE experiment
+paid for:
 
-| ordering | answer session in top-8 |
-|---|---|
-| shipped (head max) | 22/70 = 31.4 % |
-| **F1 alone (query ↔ first message)** | **30/70 = 42.9 %** (+11) |
-| fused (head + F1) | 29/70 = 41.4 % |
+| ordering | bare plans | **with-options plans (the deployed path)** |
+|---|---|---|
+| shipped (head max) | 31.4 % | **97.1 %** (68/70) |
+| F1 alone | 42.9 % | **61.4 %** — actively harmful |
+| fused (head + F1) | 41.4 % | 91.4 % |
 
-Context that makes this the first clean read of the F1 signal: answer-session
-pooling on this anchor is 82.9 % (58/70), so the loss is **selection, not
-recall** — and the selection signal that works is the one channel the
-adversarial construction does not poison (first messages state each
-session's own problem; the lead distractor tracks the issue only at the
-claim level). Two caveats carried forward: on the old anchor F1-alone
-measured exactly baseline (0.4747 vs 0.4746), so this is anchor-conditional,
-not a universal selector; and the fusion weighting here is untested against
-answers (this replay measures reach, not accuracy — the 35 sealed questions
-are for that). Next step when warranted: F1-primary selection on the tune
-set's answer accuracy, then the sealed set once, then the deployment A/B
-decision.
+Three corrections the re-run forces:
+
+1. **The "22/70 menu bottleneck" was a bare-plan artifact.** Under
+   option-aware plans — which the e2e runner and the platform always send —
+   the shipped ordering puts the answer session in the top-8 for 97.1 % of
+   questions, and pooling is 100 %. The menu was never the constraint; the
+   option-derived probes already carry the claim vocabulary (the same
+   absorption that killed query-side HyDE, measured independently here).
+2. **F1 selection is harmful on the deployed path**: the first-message
+   cosine competes with option probes and loses (97.1 → 61.4). Same failure
+   signature as select-llm's reversal — the signal wins only where the
+   adversarial prior aligns with it.
+3. **The claim-anchor loss is judgment conversion, not the menu.** The LLM
+   sees the right session 97 % of the time and its picks convert at ~48 %
+   (payload hit 46.6 %) — and on this anchor its errors follow the
+   adversarial lead (select-llm 0.229, below floor, vs deterministic
+   0.300). On leak-free instruments the deterministic stack is the only arm
+   above floor; LLM judgment is the weak link.
+
+**Instrument rule, upgraded to a standard after two experiments hit the same
+trap**: every replay must run the plan the deployment runs — with options
+whenever the platform sends them. Bare-question replays answer a different
+question than the one the submission asks.
 
 ### Assembly: sessions rank, chunks are evidence
 
