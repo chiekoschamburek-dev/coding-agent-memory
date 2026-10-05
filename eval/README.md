@@ -1830,6 +1830,33 @@ precise sense in which algorithm work pauses here: not out of ideas, but
 because every further rung needs either a bigger instrument or the
 platform's own feedback to be judged at all.
 
+### F1 selection on the claim-topical anchor: the hypothesis lands (2026-10-05)
+
+`scripts/claim_anchor_f1.py`, 70-question tuning set, zero relay calls. The
+opening-statement hypothesis — the gold session states its problem in
+query-like vocabulary while distractors state theirs — measured as a
+selection mechanism on the anchor where lexical matching is adversarially
+poisoned:
+
+| ordering | answer session in top-8 |
+|---|---|
+| shipped (head max) | 22/70 = 31.4 % |
+| **F1 alone (query ↔ first message)** | **30/70 = 42.9 %** (+11) |
+| fused (head + F1) | 29/70 = 41.4 % |
+
+Context that makes this the first clean read of the F1 signal: answer-session
+pooling on this anchor is 82.9 % (58/70), so the loss is **selection, not
+recall** — and the selection signal that works is the one channel the
+adversarial construction does not poison (first messages state each
+session's own problem; the lead distractor tracks the issue only at the
+claim level). Two caveats carried forward: on the old anchor F1-alone
+measured exactly baseline (0.4747 vs 0.4746), so this is anchor-conditional,
+not a universal selector; and the fusion weighting here is untested against
+answers (this replay measures reach, not accuracy — the 35 sealed questions
+are for that). Next step when warranted: F1-primary selection on the tune
+set's answer accuracy, then the sealed set once, then the deployment A/B
+decision.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
