@@ -1924,6 +1924,46 @@ signature. The headline claim of the campaign is now **significant on the
 pooled instrument set**: the deterministic stack answers better than pure
 RAG, and the advantage grows as the instrument gets fairer to memory.
 
+### Sealed anchor unsealed; four-strata pooling (2026-10-05)
+
+Instrument expansion per the frontier map's own first recommendation: the
+sealed claim split (35 q, untouched since construction) was unsealed with the
+minimal arm set, and everything pooled.
+
+**Sealed anchor, first and only look (n=35):** floor 0.314, deterministic
+**0.400** (+4/−1 vs floor), RAG 0.371 (+4/−3 vs deterministic, p=1.0). Two
+honest notes: the sealed floor is higher than the tune split's (0.314 vs
+0.243 — the sealed half is somewhat easier or milder), and RAG sits *above*
+floor here, softening "the claim anchor kills RAG" to "at or below floor on
+claim-type, mixed at this n".
+
+**Four-strata pooling, deterministic vs RAG** (the headline comparison):
+
+| stratum | discordants (+det/−RAG) | p |
+|---|---|---|
+| file (90 q) | +4/−2 | 0.69 |
+| procedure (58 q) | +9/−1 | 0.022 |
+| claim-tune (70 q) | +10/−3 | 0.092 |
+| claim-sealed (35 q) | +4/−3 | 1.00 |
+| **pooled (253 q)** | **+27/−9** | **p=0.0039** |
+
+Fisher's combination across the four strata is weaker (p=0.105) — two
+strata are individually null and Fisher spends df on them; the pooled
+discordant test is the primary, and it is the one whose assumptions match
+the design (same direction, shared per-question pairing). The resolution
+goal is met: pooled n≈253 turns a 5 pp consistent effect into ~12 net
+discordants, comfortably decidable.
+
+**Deterministic vs no-memory floor, pooled: +17/−7, p=0.064.** Recorded
+with its warts on: memory's help over the answer model's own prior is
+direction-consistent on all four anchors but **does not clear p<0.05 even
+pooled — one question short**. The two headline claims must therefore be
+stated with different strengths: "the deterministic stack beats pure RAG"
+is significant (p=0.0039); "memory helps over no memory" is
+direction-consistent, pooled-positive, and one question shy. On a leak-free
+adversarial instrument, denoising beats flooding decisively, but beating
+the prior outright remains an open — and honest — frontier.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
