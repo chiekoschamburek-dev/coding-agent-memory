@@ -1868,6 +1868,39 @@ trap**: every replay must run the plan the deployment runs — with options
 whenever the platform sends them. Bare-question replays answer a different
 question than the one the submission asks.
 
+### Claim-anchor RAG control: the instrument verdicts, cross-checked (2026-10-05)
+
+The claim-topical reversal had a hole: only our own arms were measured on
+the new anchor, so "select-llm below floor" could not be split into
+instrument artifact vs genuine failure. The RAG control closes it
+(`e2eC2_rag.json`, 70 q × 5, same protocol):
+
+| arm | accuracy | vs floor 0.243 | reach |
+|---|---|---|---|
+| **RAG (dense top-100)** | **0.200 — the worst arm measured** | −4.3 pp, +3/−6, p=0.51 | **87.1 %** |
+| select-llm | 0.229 | −1.4 pp | 46.6 % |
+| votes3 | 0.214 | −2.9 pp | — |
+| **deterministic (shipped)** | **0.300** | **+5.7 pp** | 42.9 % |
+
+Three consequences:
+
+1. **The instrument is not the problem.** The deterministic stack sits at
+   0.300 — comfortably above floor — on the same questions where RAG, the
+   LLM judge, and the vote ensemble all fall below it. An anchor that only
+   our machinery fails would have pulled the deterministic arm down too.
+2. **The claim anchor discriminates harder than the file anchor, in the
+   same direction.** RAG's cross-anchor trajectory tracks prior leakage,
+   not retrieval: file anchor (leaky) tied with prior; procedure anchor
+   below prior (p=0.15); claim anchor (leak-free, adversarial lead) at the
+   bottom of the table with 87.1 % reach. Reach is fully paid for in noise,
+   and the cleaner the instrument, the earlier the bill arrives.
+3. **select-llm and RAG are statistically inseparable here** (+3/−5,
+   p=0.73): on adversarial instruments the LLM judge and the flood converge
+   — both amplify the adversarial prior, one by alignment, one by exposure.
+
+The deterministic stack is now the only arm above floor on both anchors —
+the reversal conclusion survives its control, strengthened.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
