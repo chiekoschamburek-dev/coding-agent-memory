@@ -71,6 +71,7 @@ class SearchPipeline:
         limit = max(1, min(top_k, self.settings.max_top_k))
 
         plan = plan_query(query, options)
+        plan = self._hyde_probe(plan)
         candidates = self.retriever.recall(user_id, plan)
         if not candidates:
             log.info(
@@ -257,6 +258,40 @@ class SearchPipeline:
         "You select which past engineering sessions recorded the cause or the "
         "fix of a described problem. Reply with exactly two numbers."
     )
+
+    def _hyde_probe(self, plan):
+        """Query-side HyDE: one relay call rewrites the query as the note a
+        past session would have recorded; that text rides along as an extra
+        probe (lexical BM25s every probe; dense embeds query + first three).
+        The claim-anchor funnel measured the shipped plan seating the answer
+        session in the top-8 for 22/70 questions while 36 more were admissible
+        at rank 9+ — a representation gap between how questions arrive (raw
+        issue) and how answers are stored (recorded cause-prose). With the
+        probe, the offline replay moved the menu to 29/70 (net +7, 9 wins /
+        2 losses). Fail-safe by construction: no relay, timeout, or empty
+        reply returns the plan unchanged. Entity channel untouched, so the
+        effect attributes to lexical + dense only.
+        """
+        if not self.settings.hyde_probe:
+            return plan
+        if not (self.settings.llm_base_url and self.settings.llm_api_key):
+            return plan
+        try:
+            issue = plan.query.split("Issue:\n", 1)[-1].split(
+                "\n\nWhich statement", 1
+            )[0].strip() if "Issue:\n" in plan.query else plan.query
+            note = self._chat(
+                "You write the note an engineering session would have recorded "
+                "while diagnosing or fixing a problem. Reply with the note only: "
+                "first person, 1-3 sentences, naming concrete identifiers "
+                "(functions, files, flags), stating the cause or the fix.",
+                issue[:2400],
+            )
+            if note and note.strip():
+                plan.probes = plan.probes + [note.strip()]
+        except Exception:  # never fail Search on the probe
+            return plan
+        return plan
 
     def _llm_select_sessions(
         self,

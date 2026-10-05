@@ -1751,7 +1751,63 @@ is query-side HyDE — the instrument builder itself is the existence
 proof that issue↔claim embedding affinity ≥ 0.55 carries anchor
 structure (it built 105 questions on it).
 
+### Query-side HyDE: pre-registered before any run (2026-10-05)
+
+The funnel's two surviving buckets (11 gated, 36 ranked-9+) both ask for
+a better query *representation*: the raw issue text is how the question
+arrives, but the corpus stores answers as recorded cause-prose. Query-side
+HyDE converts one into the other at Search time: one gpt-4o-mini call
+rewrites the issue as the statement a past session would have recorded
+("first person, naming identifiers, 1–3 sentences"), and that text enters
+the plan as an additional probe — the lexical channel BM25-matches it
+(passes the gate by construction: its vocabulary is claim vocabulary) and
+the dense channel embeds it beside the true claims. The claim builder
+itself is the existence proof that issue↔claim affinity carries anchor
+structure. Zero Add cost, one relay call per Search, fallback to the raw
+query on any failure. The HyDE probe deliberately enters lexical + dense
+only; the entity channel is untouched, so any effect attributes cleanly.
+
+**Kill lines, pre-registered:**
+
+1. *Offline gate* — replayed menu membership must gain **≥ 3 net** (menu
+   wins minus menu losses vs the shipped plan, per-query paired) for the
+   e2e arm to be built. Gross gains ≈ gross losses is the churn signature
+   that killed `dense_eligible` on this anchor — net is the only currency.
+2. *Fusion signature* — if the arm is built and moves menu but not
+   answers on the claim e2e: dead.
+3. Generation is cached (`eval/results/hyde_claims.json`); reruns never
+   re-spend relay calls. Tune split only; the sealed 35 untouched.
+
+**Measured (2026-10-05, same day).** Offline (`scripts/hyde_probe.py`,
+base replay validating bitwise against the funnel's 22/11/36/1): the
+generated notes moved the answer-session menu **22/70 → 29/70, net +7**
+(9 wins — 8 of them from the dominant rank9+ bucket — 2 losses), and the
+kill-line-1 gate passed. The e2e arm (with the probe implemented in the
+service, fail-safe, guard-tested) then scored **0.3000 with reach 30/70 —
+identical to the baseline on both numbers**. Kill line 2 fires: menu
+moved offline, nothing moved on answers.
+
+The mechanism closes both this death and the older 30-vs-22 reconciliation
+caveat: **the e2e runner — and the platform — send the four options with
+every Search, and the options are claims**: option-derived probes are
+already claim-shaped query rewriting, structurally. The offline +7 was
+measured against a question-only plan (the replay convention inherited
+from the miss diagnosis); the deployed path never runs that plan. Where
+options exist, a generated note adds nothing they do not already carry;
+the ~8-session gap between question-only and option-carrying plans was
+the same effect wearing a different hat.
+
+Boundary recorded honestly: `hyde_probe` stays implemented, off by
+default. It is **dead for multiple-choice queries** (subsumed by option
+probes) and **untested-but-plausible for option-less queries** — the
+offline +7 is exactly the option-less regime, and open-ended questions
+have no probes doing the work for free. If the platform's evaluation
+turns out to include option-less retrieval, this flag is the ready lever,
+with a measured offline case behind it.
+
 ### The algorithmic frontier map (closing the campaign, 2026-10-04)
+
+
 
 
 

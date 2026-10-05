@@ -177,6 +177,13 @@ class Settings:
     # samples that distribution and takes its mode. 1 = the shipped
     # one-shot behaviour, byte-for-byte.
     session_select_votes: int = 1
+    # Query-side HyDE: one relay call per Search rewrites the query as the
+    # note a past session would have recorded; that text rides as an extra
+    # probe through lexical + dense (entity channel untouched). Offline on
+    # the claim anchor: menu 22/70 -> 29/70, net +7 (eval/README.md, the
+    # query-side HyDE section). Fail-safe on every failure mode; off by
+    # default pending the e2e verdict.
+    hyde_probe: bool = False
     # Cap on distinct sessions in one payload. 0 means unlimited, which was the
     # earlier default. Tightening it to 2 is the companion move to the cap
     # increase above: with fewer sessions competing for the token prefix,
@@ -577,6 +584,7 @@ class Settings:
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
         )
         put("session_select_votes", _env_int("CODEMEM_SESSION_SELECT_VOTES", 1))
+        put("hyde_probe", _env_bool("CODEMEM_HYDE_PROBE", False))
         put("card_expansion", _env_bool("CODEMEM_CARD_EXPANSION", False))
         put("llm_base_url", (_env_str("CODEMEM_LLM_BASE_URL", None) or "").strip() or None)
         put("llm_api_key", (_env_str("CODEMEM_LLM_API_KEY", None) or "").strip() or None)

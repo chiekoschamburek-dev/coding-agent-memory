@@ -450,6 +450,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="two-stage session selection: one gpt-4o-mini "
                              "call picks the two sessions that record the "
                              "cause/fix from compact summaries")
+    parser.add_argument("--hyde-probe", action="store_true",
+                        help="query-side HyDE: one relay call per Search "
+                             "rewrites the query as a recorded-claim-style "
+                             "note and rides it as an extra probe")
     parser.add_argument("--session-select-votes", type=int, default=None,
                         help="selection self-consistency: run the selection "
                              "call N times and majority-vote the session "
@@ -523,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_feature_fusion"] = True
     if getattr(args, "session_select_llm", False):
         overrides["session_select_llm"] = True
+    if getattr(args, "hyde_probe", False):
+        overrides["hyde_probe"] = True
     if getattr(args, "session_select_votes", None) is not None:
         overrides["session_select_votes"] = args.session_select_votes
     if args.dense_enabled is not None:

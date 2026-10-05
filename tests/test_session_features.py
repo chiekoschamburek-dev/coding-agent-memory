@@ -273,3 +273,56 @@ def test_select_votes_majority_overrides_first_call(monkeypatch, tmp_path):
         assert set(order) == {"s1", "s2"}, (
             "majority replaces the first call's s3 with s1"
         )
+
+
+def test_hyde_probe_flips_lexical_order(monkeypatch, tmp_path):
+    """Query-side HyDE wiring, end to end through the real handle(). The
+    stub relay returns a note naming an identifier ("zanzibar ledger") that
+    appears nowhere in the query and only in session B: with hyde_probe on,
+    the note rides as an extra BM25 probe and B must take the payload's
+    first slot; with the flag off, A (which matches the raw query) wins.
+    Guards the wiring — this class of path failed silently twice before."""
+    import logging
+
+    from codemem.api.app import create_app
+    from codemem.search.service import SearchPipeline
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        dense_enabled=False,
+        rerank_enabled=False,
+        min_evidence_score=0.0,
+        hyde_probe=True,
+        llm_base_url="http://relay.test",
+        llm_api_key="stub",
+    )
+    app = create_app(settings)
+
+    def stub_chat(self, system: str, user: str) -> str:
+        return ("The quota retry failed because the zanzibar parity "
+                "ledger src/zz.py was stale, so I refreshed it before retry.")
+
+    monkeypatch.setattr(SearchPipeline, "_chat", stub_chat)
+    logging.disable(logging.WARNING)
+    with TestClient(app) as client:
+        for sid, rid, body in (
+            ("a", "r1", "quota retry backoff handler quota retry backoff handler: plain src/a.py"),
+            ("b", "r2", "zanzibar parity ledger zanzibar parity ledger: refreshed src/zz.py"),
+        ):
+            client.post("/add", json={
+                "request_id": rid, "user_id": "u1", "session_id": sid,
+                "messages": [{"role": "user", "timestamp": 1, "content": body}],
+            })
+        response = client.post("/search", json={
+            "query": "quota retry backoff handler", "user_id": "u1", "top_k": 10,
+        })
+        items = response.json()["data"]
+        assert items
+        store = client.app.state.container.store
+        mids = [int(i["id"].split("_")[1]) for i in items]
+        sessions = store.session_map("u1", mids)
+        first = sessions.get(mids[0])
+        assert first == "b", (
+            "the hyde note names zanzibar; the probe must carry session b "
+            "to the first slot"
+        )
