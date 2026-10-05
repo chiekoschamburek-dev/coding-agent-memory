@@ -1632,7 +1632,94 @@ generalisation-verdict section) and the default returned to off;
 `dense_eligible@0.45` remains the smoke-window A/B arm; fusion and
 top-k mass stay off as documented levers.
 
+### The small LTR combiner: pre-registered before any run (2026-10-05)
+
+The roadmap's last parked lever, now unblocked by the second anchor. What
+it can settle that nothing else can: **whether the deterministic feature
+space itself transfers across anchors** — the property whose absence just
+reversed `session_select_llm` (a judgment that inherits the answer model's
+prior). A learned combiner is prior-free and relay-free by construction.
+
+Design, fixed before running. Features per (query, session), query-internal
+so they are comparable across queries: the four scoring terms recomputed
+verbatim from the Candidate fields (base = rrf/max_rrf, coverage =
+informative-channel agreement, strength = within-channel normalised
+magnitude, entity = IDF-weighted identifier match), plus F1 (first-message
+cosine), rare-vocabulary union coverage, the corrected F3, the session's
+rank in the shipped order, and pooled-member count — ten features. Labels:
+anchor A = the benchmark's own file-overlap `relevant` sets (multi-positive,
+strong = ≥2 shared files); anchor B = the claim instrument's answer
+sessions. Models: L2 logistic (main) and a depth-3 GBDT (interaction
+control), GroupKFold by query on the training side. Four regimes: A→A,
+B→B (grouped CV), and the transfer cells A→B, B→A. Metrics: positive in
+learned top-2 / top-8 against the shipped-order baseline.
+
+**Kill lines, pre-registered:**
+
+1. *Fusion signature* — the learned order moves top-2/top-8 membership but
+   an e2e arm (if built) does not move answers: dead, like every
+   retrieval-statistic lever before it.
+2. *Transfer failure* — A→B (or B→A) lands at or below the shipped-order
+   baseline on the target anchor: dead as a combiner, and recorded as a
+   finding about the feature space — the deterministic stack's features do
+   not generalise across anchors, which raises the recall-side card's
+   priority further.
+3. Offline gate — the e2e arm is only built if the transfer cell beats the
+   shipped baseline on the target anchor's top-2 membership; otherwise the
+   combiner dies before a line of product code (the diversification
+   precedent).
+
+The sealed 35 claim questions are not spent here; they remain reserved for
+a final confirmation of a shipping configuration.
+
+**Measured (2026-10-05, same day).** 159 queries (89 anchor-A with the
+benchmark's multi-positive file-overlap labels, 70 anchor-B), 301 positive
+pairs, deep-24 candidates each; `scripts/ltr_data.py` → `scripts/ltr_train.py`.
+Logistic (L2, class-balanced) and depth-3 GBDT, GroupKFold-by-query:
+
+| regime | top-2 hit | shipped | paired | top-8 hit | shipped | paired |
+|---|---|---|---|---|---|---|
+| logistic A→A (cv) | **77**/88 | 73/88 | +7/−3 | 84/88 | 85/88 | +1/−2 |
+| logistic B→B (cv) | 11/48 | 10/48 | +3/−2 | **28**/48 | 22/48 | **+8/−2** |
+| logistic **A→B (transfer)** | 11/48 | 10/48 | +3/−2 | **28**/48 | 22/48 | **+8/−2** |
+| logistic B→A (transfer) | 73/88 | 73/88 | +5/−5 | 85/88 | 85/88 | +2/−2 |
+| gbdt B→A (transfer) | 51/88 | 73/88 | +5/−27 | 77/88 | 85/88 | +2/−10 |
+
+**Verdict per the pre-registered lines:**
+
+- **Kill line 2 (transfer failure) does NOT fire — the headline finding.**
+  The A-trained combiner on the claim anchor reproduces the within-anchor
+  CV to the digit (11/48 top-2, 28/48 top-8, +8/−2) despite training on a
+  different relevance definition. Verified not a leak: the A→B and B→B
+  score vectors correlate at 0.803 with different learned weights (A-trained:
+  f1 +0.74, rare_cov +0.50, entity **−0.23**; B-trained: f1 +0.27, entity
+  +0.17) — two learners converging on the same ranking. **The deterministic
+  feature space transfers across anchors.** The mechanism is visible in the
+  weights: the model leans on the anchor-agnostic signals (first-message
+  cosine, rare-vocabulary coverage) and learns that the IDF entity match —
+  the file-flavoured signal same-file distractors exploit — is
+  anti-informative conditioned on them.
+- **Kill line 1 (fusion signature) fires on effect size.** The operative
+  metric for a shipped reorder is top-2 (budget 2, selection off): +1/48
+  on anchor B, +4/88 on anchor A — beneath every instrument's resolution.
+  The top-8 gain (+6 queries on B) is menu membership, and with no
+  selection stage consuming the menu it has no path to answers at budget
+  2. **No e2e arm, no product code** — the diversification precedent.
+- **GBDT is dead on this data size**: B→A loses 27 queries net — 105
+  positives cannot support trees; logistic only.
+
+What survives is the insight, and it feeds the parked card directly: the
+two features that carry the transfer are exactly the first-message and
+rare-vocabulary semantics a card makes permanent at Add time, and the
+entity term the learned model discounts is the one hard distractors
+exploit. Next-cycle candidate, recorded: a deterministic scorer with the
+entity term down-weighted in the presence of first-message/coverage
+signal — the LTR's own recipe, testable only on instruments that can
+resolve it.
+
+
 ### The algorithmic frontier map (closing the campaign, 2026-10-04)
+
 
 From the miss-diagnosis replay (`select_miss_diagnosis.json`), the remaining
 headroom on the memory-dependent instrument, as a ladder:
