@@ -3,7 +3,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .zcode/
-
+.qoder/
 # Never commit credentials.
 .env
 
