@@ -99,6 +99,27 @@ Mechanistic negative results carried alongside (worth more than plain nulls):
   +2/−0, one verified mechanism case, one env flip with measured rollback).
   Never combine with `dense_eligible_min_similarity=0.30` (reversal measured).
 
+## 2a-bis. The noise law and its boundary (read before tuning anything)
+
+The submitted configuration is deliberately compact, and the reason is
+measured, not aesthetic: **on adversarial multiple-choice instruments,
+retrieval reach buys matching confusion**. Four independent mechanism
+families (feature fusion, LLM selection stacking, query-side HyDE, a
+claims-only side-channel) each increased evidence reach and each failed to
+improve — or reversed — answer accuracy on leak-free anchors; the
+claims-channel experiment supplied the mechanism: when the options quote
+corpus claims, the retrieved "relevant" claims include the distractor
+options' own sources, so reach and confusion are the same material.
+
+**This law is instrument-conditional.** It does not say retrieval reach is
+bad in general. Its precondition — distractor options quoting corpus
+claims — is a property of adversarial multiple-choice evaluation. On
+non-adversarial, option-less queries the bill has never been observed, and
+two retained flags are the ready levers for exactly that regime
+(`CODEMEM_SESSION_FEATURE_FUSION`, `CODEMEM_CLAIM_CHANNEL`; offline data
+supports both there). If the deployment or a future evaluation cycle sends
+option-less queries, re-enable and re-measure before concluding anything.
+
 ## 2b. One-shot reality
 
 There is **no platform-feedback loop this cycle**: one Full evaluation, no

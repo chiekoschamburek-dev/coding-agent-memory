@@ -2034,6 +2034,30 @@ as a flag (off; compliant, zero-displacement, and the right tool if a
 future instrument rewards claim recall over claim discrimination). Default
 configuration unchanged: deterministic stack, no relay on the graded path.
 
+**The law's evidence strength, stated precisely**: not in any single p
+value — each e2e reversal is within instrument noise, and the two-anchor
+pool (+3/−7) is not significant either. It rests on **four independent
+mechanism families reproducing the same signature** (fusion, stack, HyDE,
+claims-channel) plus this experiment's **testable mechanism**: 3 of every 4
+attached claims are the distractor options' own source claims. That is the
+campaign's most valuable single output — it upgrades "return everything is
+harmful" from an empirical observation to a mechanistic explanation, and
+incidentally explains RAG's cross-anchor trajectory (87 % reach, bottom of
+the table) and why the compact payload is the only survivor.
+
+**The law is instrument-conditional, not universal.** The confusion
+symmetry holds because the adversarial MC construction makes the
+distractor options quote corpus claims — reach and confusion are the same
+material. On a non-adversarial, option-less distribution that identity
+breaks, and with it the bill. This leaves exactly one surviving branch:
+the **option-less regime**, where query-side HyDE's offline +7 was measured
+(it died only because option probes absorbed it) and where the
+claims-channel's death mechanism does not apply. Both flags are retained
+(default off) with ready revival justifications and offline data if the
+platform ever sends option-less queries. SUBMISSION.md carries this
+boundary so "reach buys confusion" is not misread as a condemnation of
+retrieval in general — it is a property of adversarial MC instruments.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
