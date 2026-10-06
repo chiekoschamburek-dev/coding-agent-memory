@@ -166,6 +166,7 @@ class SearchPipeline:
             session_features=session_features,
         )
         items = self._dense_fill(user_id, plan, candidates, memories, items)
+        items = self._claim_fill(user_id, plan, memories, items)
 
         log.info(
             "search done",
@@ -423,6 +424,152 @@ class SearchPipeline:
                 extra={"ctx": {"error": str(exc)[:200]}},
             )
             return None
+
+    _CLAIM_SELECT_SYSTEM = ""  # selection is embedding-only; no relay call
+
+    def _claim_fill(
+        self,
+        user_id: str,
+        plan: QueryPlan,
+        memories: dict,
+        items: list,
+    ) -> list:
+        """Claims-only dense side-channel: APPEND claim-shaped memories that
+        the option probes retrieve above an absolute cosine floor.
+
+        Non-competing by construction: the append happens after assembly and
+        never revisits or displaces what the seated sessions carry — the
+        anti-churn constraint from three measured non-monotonicities. The
+        claim index is the user's assistant cause-prose (a shape filter over
+        stored memories), with vectors reused from the dense channel; no
+        relay call. Never raises.
+        """
+        settings = self.settings
+        if not settings.claim_channel or not items:
+            return items
+        embedder = self.retriever.embedder
+        if embedder is None or not embedder.available or not plan.probes:
+            return items
+        try:
+            index = self._claim_index(user_id)
+            if not index:
+                return items
+
+            probe_vecs = embedder.embed(plan.probes[:4]) or []
+            if not probe_vecs:
+                return items
+
+            hits = []
+            for pvec in probe_vecs:
+                if not pvec:
+                    continue
+                for entry in index:
+                    vec = entry["vec"]
+                    if not vec or len(vec) != len(pvec):
+                        continue
+                    score = sum(a * b for a, b in zip(pvec, vec))
+                    if score >= settings.claim_channel_floor:
+                        hits.append((score, entry))
+            hits.sort(key=lambda pair: (-pair[0], pair[1]["memory_id"]))
+
+            tail = items[-1].score
+            out = list(items)
+            used_memory = {item.memory_id for item in items}
+            used_text = {item.content for item in items}
+            attached = 0
+            for score, entry in hits:
+                if attached >= settings.claim_channel_cap:
+                    break
+                if entry["memory_id"] in used_memory:
+                    continue
+                if entry["text"] in used_text:
+                    continue
+                nxt = tail - 1e-5
+                if nxt < 1e-6:
+                    break
+                tail = nxt
+                out.append(
+                    EvidenceItem(
+                        memory_id=entry["memory_id"],
+                        content=entry["text"],
+                        score=round(nxt, 6),
+                        created_at=entry["created_at"],
+                        tokens=count_tokens(entry["text"]),
+                        truncated=False,
+                        superseded=entry["superseded"],
+                    )
+                )
+                used_memory.add(entry["memory_id"])
+                used_text.add(entry["text"])
+                attached += 1
+            if attached:
+                log.info(
+                    "claim fill",
+                    extra={"ctx": {"user_id": user_id, "attached": attached}},
+                )
+            return out
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "claim fill skipped",
+                extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
+            return items
+
+    def _claim_index(self, user_id: str) -> list[dict]:
+        """Lazily built claims-only index for one user: assistant cause-prose
+        memories with their stored dense vectors. Cached on the instance with
+        the user's memory count as the staleness token (a later Add rebuilds)."""
+        cached = getattr(self, "_claim_index_cache", None)
+        total = self.store.user_memory_count(user_id)
+        if cached and cached.get("user_id") == user_id and cached.get("total") == total:
+            return cached["index"]
+        rows = self.store.claim_rows(user_id)
+        vecs = self.store.vectors_for(user_id, [r["memory_id"] for r in rows])
+        index = [
+            {
+                "memory_id": r["memory_id"],
+                "session_id": r["session_id"],
+                "text": r["text"],
+                "created_at": r["created_at"],
+                "superseded": r["superseded"],
+                "vec": vecs.get(r["memory_id"]),
+            }
+            for r in rows
+            if r["memory_id"] in vecs and self._claim_shape(r["text"])
+        ]
+        self._claim_index_cache = {
+            "user_id": user_id, "total": total, "index": index,
+        }
+        return index
+
+    _CAUSE = re.compile(
+        r"\b(because|caused by|due to|which (?:causes?|fails?|leads? to|makes? it)|"
+        r"root cause|the problem is|the issue is|"
+        r"(?:does not|doesn't) handle|fails? when|instead of|rather than|"
+        r"must (?:also|be|set|be updated)|requires? (?:that|both|updating|the)|"
+        r"in order to|otherwise|silently (?:ignored|fails?)|needed to|"
+        r"so that|turns out|the fix (?:was|is)|which means|"
+        r"this (?:happens|breaks|works|way)|we need to|have to|"
+        r"was (?:because|caused)|results? (?:in|from)|resulting in|"
+        r"the reason|fix(?:ed)? by|workaround|make sure|"
+        r"without (?:this|that)|with this change|it should|the cause)\b",
+        re.IGNORECASE,
+    )
+    _CLAIM_SYMBOL = re.compile(r"`[^`]{2,}`|[a-z]+_[a-z_]+|[A-Z][a-z]+[A-Z]\w*|\w+\.\w+")
+    _CLAIM_SCAFFOLD = re.compile(
+        r"swebench_|testbed/|my (?:mock|fake|test)\w*|manual\.yaml|_preds\.json|scratch",
+        re.IGNORECASE,
+    )
+
+    def _claim_shape(self, text: str) -> bool:
+        text = text or ""
+        if not (80 <= len(text) <= 700):
+            return False
+        if text.lstrip().startswith(("[tool", "```", "[result]")):
+            return False
+        if not self._CAUSE.search(text) or not self._CLAIM_SYMBOL.search(text):
+            return False
+        return not self._CLAIM_SCAFFOLD.search(text)
 
     def _dense_fill(
         self,

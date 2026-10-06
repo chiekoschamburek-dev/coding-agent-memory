@@ -415,6 +415,55 @@ class Store:
             )
         return memory_id
 
+    def vectors_for(
+        self, user_id: str, memory_ids: Sequence[int]
+    ) -> dict[int, list[float]]:
+        """Stored dense vectors for the given memories (user-scoped)."""
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT memory_id, vec FROM memory_vector WHERE user_id = ?"
+                f" AND memory_id IN ({placeholders})",
+                [user_id, *memory_ids],
+            ).fetchall()
+        return {int(r["memory_id"]): _unpack(r["vec"]) for r in rows}
+
+    def user_memory_count(self, user_id: str) -> int:
+        """Total memory rows for one user — the claim-index staleness token."""
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM memory WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return int(row["n"])
+
+    def claim_rows(self, user_id: str) -> list[dict]:
+        """Candidate claim rows for one user: assistant-role memories with
+        their session, text and audit columns. The claim-shape filter is
+        applied by the caller (regex, kept out of the store)."""
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT m.id AS memory_id, m.session_id, m.text, m.created_at,"
+                " m.superseded_by FROM memory m"
+                " JOIN chunk c ON c.id = m.chunk_id"
+                " JOIN raw_message r ON r.user_id = c.user_id"
+                "   AND r.request_id = c.request_id"
+                "   AND r.msg_index = c.msg_index"
+                " WHERE m.user_id = ? AND r.role = 'assistant'",
+                (user_id,),
+            ).fetchall()
+        return [
+            {
+                "memory_id": int(r["memory_id"]),
+                "session_id": r["session_id"],
+                "text": r["text"],
+                "created_at": r["created_at"],
+                "superseded": r["superseded_by"] is not None,
+            }
+            for r in rows
+        ]
+
     def first_messages(self, user_id: str, session_ids: Sequence[str]) -> dict[str, str]:
         """The first raw message per session — the task/issue statement.
 

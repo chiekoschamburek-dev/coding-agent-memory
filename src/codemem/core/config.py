@@ -171,6 +171,16 @@ class Settings:
     # menu is saturated (97.1 % top-8) while only 13.5 % of gold chunks are
     # emitted: the head score picks sessions, not content. Off by default.
     intra_session_order_weight: float = 0.0
+    # Claims-only dense side-channel: a non-competing entry for claim prose.
+    # The claim chunks never pool (15.7 %) and the menu is saturated (97.1 %),
+    # so dense_eligible-style competition was measured dead — this channel
+    # instead APPENDS claim-shaped memories (assistant cause-prose) retrieved
+    # by option-probe cosine above an absolute floor, after assembly, without
+    # displacing anything. Offline: gold-claim delivery 0 -> 84.3 % (cap 3),
+    # zero displacement. Off by default.
+    claim_channel: bool = False
+    claim_channel_floor: float = 0.45
+    claim_channel_cap: int = 3
     # Hard budget for the selection call. The relay answered in ~1 s when
     # healthy; 10 s bounds the tail so the fallback (shipped ordering) fires
     # well inside the platform's 30-minute Search ceiling while keeping
@@ -591,6 +601,12 @@ class Settings:
             "intra_session_order_weight",
             _env_float("CODEMEM_INTRA_SESSION_ORDER_WEIGHT", 0.0),
         )
+        put("claim_channel", _env_bool("CODEMEM_CLAIM_CHANNEL", False))
+        put(
+            "claim_channel_floor",
+            _env_float("CODEMEM_CLAIM_CHANNEL_FLOOR", 0.45),
+        )
+        put("claim_channel_cap", _env_int("CODEMEM_CLAIM_CHANNEL_CAP", 3))
         put(
             "session_select_timeout_seconds",
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
