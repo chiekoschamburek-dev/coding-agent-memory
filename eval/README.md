@@ -2001,6 +2001,39 @@ alone — kept so the next pooling lever can be priced against it).
 (Measurement note: an earlier reach figure of 40/70 from this harness was
 a double-count across plans; bare-plan reach is 10/70, options-plan ~30/70.)
 
+### Claims-only side-channel: e2e verdict — the fourth and final non-monotonicity (2026-10-05)
+
+The offline gate passed hugely (gold-claim delivery 0 → 84.3 % at cap 3,
+zero displacement) — and the e2e confirms the answer model converts the
+delivered claims **worse** than the compact payload. Dual-anchor e2e,
+n=105, × 5:
+
+| anchor | floor | deterministic | + claims-channel |
+|---|---|---|---|
+| claim-tune (70 q) | 0.243 | 0.300 | 0.271 (+2/−4 vs det) |
+| claim-sealed (35 q) | 0.314 | 0.400 | 0.343 (+1/−3 vs det) |
+| reach (answer session in payload) | 42.9 / 54.3 % | — | **84.3 / 85.7 %** |
+
+The offline metric moved exactly as designed and the answer metric moved
+the **opposite** way — the fourth instance of the same signature (fusion,
+stack, HyDE, claims-channel). The mechanism is now measured precisely
+enough to state as a law on adversarial instruments: **the attached claims
+include the distractor options' own source claims** (the options quote
+corpus claims; the side channel retrieves corpus claims; 3 of the 4
+attached sources are distractor-adjacent), so every point of reach buys
+matching points of adversarial confusion. The compact deterministic
+payload's advantage is precisely that it does NOT contain them.
+
+**Final verdict on the entire algorithm campaign**: the deterministic stack
+(four-channel RRF + deterministic scoring + cross-encoder + session-major
+assembly) is the only configuration above floor on every instrument, and
+every reach-expanding mechanism measured — RAG, dense_eligible, fusion,
+stack, HyDE, claims-channel — increases reach and decreases or fails to
+improve answer accuracy on the leak-free anchors. The claims-channel ships
+as a flag (off; compliant, zero-displacement, and the right tool if a
+future instrument rewards claim recall over claim discrimination). Default
+configuration unchanged: deterministic stack, no relay on the graded path.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

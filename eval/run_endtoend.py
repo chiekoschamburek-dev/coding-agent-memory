@@ -454,6 +454,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="two-stage session selection: one gpt-4o-mini "
                              "call picks the two sessions that record the "
                              "cause/fix from compact summaries")
+    parser.add_argument("--claim-channel", action="store_true",
+                        help="claims-only dense side-channel: append claim-"
+                             "shaped memories retrieved by option probes "
+                             "above an absolute floor; zero displacement")
     parser.add_argument("--hyde-probe", action="store_true",
                         help="query-side HyDE: one relay call per Search "
                              "rewrites the query as a recorded-claim-style "
@@ -533,6 +537,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_select_llm"] = True
     if getattr(args, "intra_session_order_weight", None) is not None:
         overrides["intra_session_order_weight"] = args.intra_session_order_weight
+    if getattr(args, "claim_channel", False):
+        overrides["claim_channel"] = True
     if getattr(args, "hyde_probe", False):
         overrides["hyde_probe"] = True
     if getattr(args, "session_select_votes", None) is not None:
