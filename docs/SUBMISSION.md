@@ -148,18 +148,45 @@ and the correction of one number:
   answer-prefix length (0.034) is half either neighbour's (0.066) — under
   the platform's unpublished real prefix, 2 is the only arm never worse than
   0.600. The old justification ("companion move to cap 5") is superseded.
+- **ms=3 was run on the answer metric and is not a reach play either.** The whole
+  breadth axis is flat there — 0.314 / 0.329 / 0.314 at ms=1/2/3 — while reach
+  climbs 22.9 → 42.9 → 57.1 % and acc-on-shown falls 0.688 → 0.533 → 0.425. The
+  matched comparison explains it: the 14 questions whose decisive content lands
+  in the first five items at ms=2 are the same 14 at ms=3 (14 ∩ 14; session one's
+  order is untouched by seating a third session) and they lose 14.3 pp, while the
+  13 served late at ms=2 gain 15.3 pp **without changing position**. Breadth
+  redistributes correctness; it does not add any. The earlier reading of this axis
+  as "reach is the untaken prize" is retracted — the marginal questions ms=3 newly
+  serves convert at 0.100, below the 0.243 no-memory floor.
 - **Abstention is closed as an algorithmic option.** Because accuracy on
   questions whose answer session is missing (0.175) sits *below* the
   no-memory floor (0.243), withholding would be worth +0.039 — but no
   absolute quantity the max-normalisation discards predicts it (IDF sum 0.403,
   BM25 0.563, dense 0.500, rerank logit 0.487, AUC floor ~0.64 at n=70).
-  Resemblance is not presence. The prize is index-side only, which is the
-  §5 parked recall work, and now the only remaining algorithmic surface.
+  Resemblance is not presence: in a same-repository corpus some chunk always
+  resembles the question, so score magnitude cannot tell whether the answer is
+  among them.
 - **`evidence_full_count` stays at 8.** Rendering the second session as
   pointers cuts payload tokens 28 % and improves the proxy (+1/−0) with an
   exactly identical answer outcome (0.329 → 0.329, reach and acc-on-shown
   unchanged). Side product: part of `decidable`'s ambiguity penalty is a
   string-parser artifact, not measured model confusion.
+- **The pointer explanation for ms=3's null was wrong, and so is the recall gap
+  this file leans on.** It was offered that breadth buys *nominal* reach because
+  late items are clipped to 110-token pointers: measured against exact ground
+  truth, **0 of 11** decisive items in the pointer zone hit the cap (median ~52
+  tokens) — the entries are simply short. The `shown_full` column written to test
+  that idea was deleted rather than left in place, and what the harness records
+  instead is the answer session's position.
+- **Admission-side recall work is closed by measurement, not parked.** With
+  `gold_claim` (verbatim-verified 70/70) located at message level, the decisive
+  sentence is in the recall pool and admitted for scoring for **70 of 70**
+  claim-anchor questions, yet in the payload for 27. Of the 40 questions whose
+  answer session is not shown, **0** have the content outside the pool. A new
+  eligibility channel would have zero failures to attack. The 40.5 % figure that
+  made recall look like the remaining surface is a file-overlap-anchor number, and
+  that anchor's label prefers the distractor (winning session 1.49 vs losing
+  relevant session 1.38).
 
 **The figure that moved.** The per-session dedup fix (`7203a49`) shifted the
 shipped evidence arm from the recorded **decidable 0.567 / ambiguous 0.300**
@@ -253,15 +280,23 @@ multiple-comparisons burden.
 
 ## 5. Parked (with reasons)
 
-- **Admission-side recall work** (`entity_timeline` / `supersedes` are
-  scaffolded and inactive): with abstention closed (§2a-ter) and every
-  presentation lever measured flat, the only untried surface is **how a
-  session becomes eligible at all** — 39.6 % of relevant pairs have a gold
-  chunk in the pool and the missing 40/70 questions are not detectable from
-  the score. Shape of the attempt: a session-level identifier/timeline
-  channel that can admit where lexical and entity scoring did not, using no
-  model and generating no text, so it does not touch card invariant 5 or the
-  §8 no-answer rule.
+- **~~Admission-side recall work~~ — closed 2026-10-07 by `scripts/claim_bottleneck.py`,
+  kept here so it is not re-opened.** It was queued as the last untried surface after
+  abstention closed. It measured zero headroom: the decisive sentence is in the pool and
+  admitted for 70/70 claim-anchor questions, so an `entity_timeline` eligibility channel
+  has no failure class to attack (`entity_timeline` / `supersedes` stay inactive, which is
+  now consistent with evidence rather than with neglect). What remains untried is narrower
+  and honestly labelled: the 13 questions where correct content was served and the model
+  still answered wrong are an answer-model problem, and the redistribution result above
+  says no presentation knob on this axis turns them.
+- **Item-level interleaving of the seated sessions** (round-robin emission: each session's
+  head first, then each session's second) is the one ordering change that has never been
+  run. It is tempting because accuracy correlates with position within an arm (0.643 early
+  vs 0.385 late), **but that correlation is confounded** — items are early because their
+  session scored highest — and the between-arm evidence just contradicted primacy as the
+  explanation. Pre-register it as a redistribution test, not a reach test, and read the
+  early/late strata separately. Run on `run_evidence.py` and the bottleneck probe first;
+  neither costs an answer call.
 - **Issue-language card overview** (HyDE-style: describe the problem the
   session solves, in issue vocabulary): the justification **shifted from
   digest quality to recall**. The claim anchor's binding constraint is

@@ -2678,13 +2678,16 @@ best cell in any column and never worse than 0.600 in any. That robustness — n
 
 | arm | accuracy | reach (answer session shown) | acc \| shown | acc \| absent |
 |---|---|---|---|---|
-| ms=2 (shipped) | 0.329 | 30/70 = 42.9 % | 0.533 | **0.175** |
-| ms=1 | 0.314 | 16/70 = 22.9 % | 0.688 | 0.204 |
+| ms=1 | 0.314 | 16/70 = 22.9 % | **0.688** | 0.204 |
+| ms=2 (shipped) | **0.329** | 30/70 = 42.9 % | 0.533 | **0.175** |
+| ms=3 | 0.314 | 40/70 = 57.1 % | 0.425 | 0.167 |
 
-Accuracy is a wash (+2/−3, p=1.000) hiding a significant component move: reach drops 20 pp
-with **0 gained / 14 lost, p=0.0001** — the strongest significance recorded in this repo.
-`decidable` preferred ms=1 because it measures conversion only; on the reading above it is
-right that conversion improves and wrong that this is free.
+Accuracy is flat across the whole breadth axis (0.314 / 0.329 / 0.314) while its two
+components move hard and in opposite directions: `acc | shown` falls monotonically
+0.688 → 0.533 → 0.425 as reach climbs 22.9 % → 57.1 %. ms=3's reach gain over the shipped
+arm is **0 gained / 10 lost in reverse** — i.e. +10 questions served, none un-served,
+p=0.0020, against +2/−3 correct, p=1.000. `decidable` prefers ms=1 because it measures
+conversion only; it is right that conversion improves and wrong that this is free.
 
 **Correction, and the reading frame it forces.** ms=1's shown set is a *strict subset* of
 ms=2's (16 ⊂ 30, ms1-only = 0), so `acc | shown` compares different question sets: on the 16
@@ -2695,6 +2698,19 @@ arithmetically (0.429×0.533 + 0.571×0.175 = 0.329). **Future arms must report 
 components and intersect the strata** — the aggregate is a product of two terms that the
 session budget moves in opposite directions, which is how a p=0.0001 effect shows up as a
 p=1.000 verdict.
+
+**The flat aggregate is cancellation, not inertness.** Taking the questions whose decisive
+content sits in the first five items at ms=2 (14 of them): that set is *identical* at ms=3
+(14 ∩ 14, no additions and no dropouts — session one's ordering is untouched by seating a
+third session), and on those same questions accuracy falls 0.643 → 0.500 (**−14.3 pp**).
+The 13 questions whose decisive content sat *past* item five at ms=2 rise 0.385 → 0.538
+(**+15.3 pp**) at ms=3, and **none of them moved earlier** — they gained from the extra
+sessions' content without any change of position. −2 questions here, +2 there, net zero.
+So breadth *redistributes* correctness across the question set; it does not add to it. Two
+claims that looked supported and are retracted by this: that reach was the untaken prize
+(it is bought against an equal and opposite loss), and that **primacy** was the real axis
+— the position gradient is genuine *within* an arm (0.643 vs 0.385 at ms=2) but cannot
+explain the *between*-arm movement, because the group that improved stayed late.
 
 ### No absolute quantity predicts that we have no answer (2026-10-07)
 
@@ -2746,10 +2762,64 @@ instrument it is a **null**: accuracy 0.329 → 0.329, reach 42.9 % → 42.9 %, 
 
 So session two's *text volume* is not what confuses the answer model — which also means the
 conversion gain attributed to ms=1 was mostly forfeited reach, per the strata correction
-above. And a calibration result worth recording next to the `item_tokens` sweep: the
-`ambiguous` component of `decidable` responds to payload text volume in a way the answer
+above. And a second version of the same idea is retracted by direct measurement: it was
+offered here that ms=3's reach gain was nominal because a third seated session arrives past
+`evidence_full_count` and is therefore rendered as 110-token pointers. **It is not** —
+locating the decisive sentence at message level (see the next section), 0 of 11 decisive
+items in the pointer zone at ms=3 reached the cap, and their median length is ~52 tokens
+(the corpus's memory entries median 151 characters, so the pointer tier is very nearly
+inert for them). `answer_session_shown_full` was implemented to test that explanation and
+removed once it failed, rather than left in the harness as decoration; what the harness now
+records instead is the answer session's *position*, which is a real quantity even though it
+turned out not to be the explanation either.
+
+What did survive is a calibration result worth recording next to the `item_tokens` sweep:
+the `ambiguous` component of `decidable` responds to payload text volume in a way the answer
 model demonstrably does not, so part of the ambiguity penalty this metric has been charging
 multi-session payloads is a **string-parser artifact**, not measured model confusion.
+
+### The claim anchor's failures are not admission, and reach is not the axis (2026-10-07)
+
+`scripts/claim_bottleneck.py` measures what the answer model can actually read, using
+exact ground truth instead of an overlap proxy: `qa_claim_tune.json` carries `gold_claim`,
+the literal corpus sentence the correct option quotes (verified verbatim against
+`benchmark.json` on 70/70). It is located at **message** level, not chunk level — one
+assistant message is segmented into several chunks, so requiring the whole sentence to sit
+inside one chunk fails for most questions and would have silently reported it absent
+everywhere; memories are mapped back through `chunk.msg_index`. The label path validates
+itself: the reconstructed `answer_session_shown` matches the recorded e2e arm on 70/70.
+
+```
+                              ms=2     ms=3    delta
+decisive content in pool     100.0%  100.0%    +0.0
+admitted for scoring         100.0%  100.0%    +0.0
+in payload (any form)         38.6%   48.6%   +10.0
+in payload, full form         32.9%   32.9%    +0.0   (nothing was clipped; see above)
+session shown (e2e)           42.9%   57.1%   +14.3
+accuracy                      32.9%   31.4%    -1.4
+```
+
+**Direction 4 — admission-side recall work — is closed by this, not deferred.** Failure
+classes at the shipped setting: answered correctly 23/70; **session absent and decisive
+content never pooled: 0**; session absent but content already pooled: 40; session present
+but content missing: 1; content present and still wrong: 13. Every failure has the decisive
+sentence sitting in the candidate pool, already admitted for scoring. A channel whose job is
+to make sessions eligible could attack a failure count of zero.
+
+That contradicts the number this file has been citing for the recall gap — "40.5 % of gold
+chunks enter the pool" — which is measured on the **file-overlap** anchor, whose label was
+independently shown to favour the distractor (winning session overlap 1.49 vs losing
+relevant session 1.38). Admission has headroom only where the label is the one we no longer
+trust. This is the third time a file-overlap-measured opportunity has failed to survive a
+leak-free re-measurement, and it is the strongest argument in this file for building the
+next instrument rather than the next feature.
+
+**What the failures actually are:** 40 questions of *allocation* (content in the pool,
+dropped by the session budget) and 13 of *judgment* (content served, model wrong). The
+allocation half is the ms axis above, and it is a cancellation, not a prize. The judgment
+half is not a retrieval problem. The ceiling arithmetic that made reach look worth +0.2
+(100 % reach × acc|shown 0.533) fails because `acc|shown` is not invariant in reach —
+the marginal questions ms=3 newly serves convert at 0.100, below the 0.243 floor.
 
 ### Tuning decisions taken from measurements, not intuition
 
@@ -2757,9 +2827,10 @@ multi-session payloads is a **string-parser artifact**, not measured model confu
 | Decision | Evidence |
 |---|---|
 | Keep `INTENT_KIND_BONUS` as shipped (2026-10-07) | The pairing says `code` is the only per-entry feature where gold beats what outranks it (+31.3 pp net) and `diff` is on the winning side (−24.2 pp), yet all five bonus arms convert nothing: 440-464 of ~1 000 dumped entries change rank while `gold_in_window` moves −0.6/+0.3 pp and `head_is_gold` +0.9 pp at best (p≥0.25). An axis that shuffles hundreds of ranks and no outcome is a wash, not a mis-pointing. See the bonus section. |
-| Keep `evidence_max_sessions=2`, justified by minimax regret (2026-10-07) | Six-arm ladder on current code: `decidable` falls monotonically with breadth (0.633 at 1 → 0.367 unlimited) and unlimited is significantly worse than shipped (+1/−8, p=0.039; ambiguity +10/−0, p=0.002). But arm ordering **inverts with prefix length** (wider wins at 1-2 k tokens), so the constant is a bet on an unpublished platform behaviour — and 2 is the unique lowest-regret choice over that uncertainty (0.034 vs 0.066 for both neighbours). On the answer metric it is a reach ↔ conversion dial, net flat. Do not re-propose ms=1 on `decidable` grounds. See the session-budget section. |
+| Keep `evidence_max_sessions=2`, justified by minimax regret (2026-10-07) | Six-arm ladder on current code: `decidable` falls monotonically with breadth (0.633 at 1 → 0.367 unlimited) and unlimited is significantly worse than shipped (+1/−8, p=0.039; ambiguity +10/−0, p=0.002). But arm ordering **inverts with prefix length** (wider wins at 1-2 k tokens), so the constant is a bet on an unpublished platform behaviour — and 2 is the unique lowest-regret choice over that uncertainty (0.034 vs 0.066 for both neighbours). On the answer metric the whole axis is flat (0.314 / 0.329 / 0.314 at ms=1/2/3) and now we know why: reach climbs 22.9 → 57.1 % while acc-on-shown falls 0.688 → 0.425, and the matched comparison shows **redistribution, not addition** — the 14 questions served early at ms=2 are the same 14 at ms=3 and lose 14.3 pp, while 13 served late gain 15.3 pp without changing position. Do not re-propose ms=1 on `decidable` grounds, and do not propose ms=3 as a reach play. See the session-budget section. |
 | Abstention on absolute evidence: closed (2026-10-07) | Every quantity that max-normalisation throws away (IDF sum, BM25 magnitude, dense cosine, cross-encoder logit) plus the structural counts sit at AUC 0.40-0.56 for predicting reach, against a ~0.64 detectability floor at n=70. Resemblance is not presence. The +0.039 arbitrage is real but index-side only. See the abstention section. |
-| `full_count` 8 stays; pointer rendering rejected (2026-10-07) | 8 → 5 cuts payload tokens 28 % and improves the proxy (+1/−0 decidable, +0/−1 ambiguity) but leaves accuracy, reach and acc-on-shown byte-equal (paired +1/−1, p=1.0). Second-session text volume is not the source of model confusion. Also calibrates `decidable`: part of its ambiguity penalty is a string-parser artifact. See the pointer section. |
+| `full_count` 8 stays; pointer rendering rejected (2026-10-07) | 8 → 5 cuts payload tokens 28 % and improves the proxy (+1/−0 decidable, +0/−1 ambiguity) but leaves accuracy, reach and acc-on-shown byte-equal (paired +1/−1, p=1.0). Second-session text volume is not the source of model confusion. The stronger version of the same idea — that breadth arms buy *nominal* reach because late items are clipped to 110-token pointers — was tested and **falsified**: 0 of 11 decisive items in the pointer zone hit the cap (median ~52 tokens), because memory entries here median 151 characters. The `shown_full` column built to check it was removed rather than kept. Also calibrates `decidable`: part of its ambiguity penalty is a string-parser artifact. See the pointer section. |
+| Admission-side recall work: closed by measurement, not deferred (2026-10-07) | With `gold_claim` as exact ground truth (verbatim-verified 70/70), the decisive sentence is in the recall pool and admitted for scoring for **70 of 70** claim-anchor questions, yet in the payload for 27. Of the 40 questions where the answer session is not shown, **0** have the content outside the pool. An eligibility channel therefore has a failure count of zero to attack. The contrary figure this file cites elsewhere (40.5 % of gold chunks reaching the pool) is a file-overlap-anchor measurement, and that anchor's label prefers the distractor (1.49 vs 1.38). See the bottleneck section. |
 | Report reach and conversion separately, blocked on `pool_sessions` (2026-10-07) | Accuracy factors as P(shown) x acc-on-shown + P(absent) x acc-on-absent, and the aggregate can stay flat while a component moves at p=0.0001; strata must be intersected (ms=1's shown set is a strict subset of ms=2's, which inflated the apparent conversion gain from +6.3 to +15.5 pp). `pool_sessions` predicts correctness independently of reach (p=0.011; +13.1 / +9.6 within strata) and is the covariate to block on. |
 | Keep session-major emission; reject entry-order assembly (2026-10-02) | Over a byte-identical item set (9.2 entries/query, 0 precision/recall movement), global score order does improve the ordering the platform cuts: item nDCG@10 +0.0190, item MRR +0.0257, both p<0.001 (`scripts/exp_entry_order.py`, S2 vs S0). But the shipped block order carries the position tilt and operative promotion, and on the evidence metric the entry walk without them loses decidable 0.567 → 0.300 (0 gained / 8 lost, p=0.0078; @1k prefix 0.633 → 0.167) with payload size unchanged. The proxy's gain is an order of magnitude smaller than the evidence loss; the walk order is not reopened unless the intra-session levers are ported into it and re-priced on `run_evidence.py`. The no-quota arm confirms the per-session cap is load-bearing (40.3 entries, 20.2/session flooding). |
 | Rerank window resolves with the checkpoint (2026-09-27) | bge-reranker-v2-m3 at the MiniLM-era 512/200 window is a regression against the shipped MiniLM default (decidable 0.567 → 0.400, −8/+3): 76.7 % of Edit/Write/MultiEdit memories exceed 200 tokens, so the budget clips exactly the operative evidence. Opening the window to 2048/800 recovers and passes it (0.633, +9/−2, one-sided p=0.033; entry nDCG@10 p=0.074) at +0.7k payload tokens and a latency price that is hardware-shaped (234 s/search CPU vs ~3 s GPU). So `rerank_max_length` / `rerank_doc_tokens` / `rerank_probability_scores` default to None and resolve per checkpoint (bge-reranker-v2-m3 → 2048/800/on; else 512/200/off); explicit values always win. The proxy's recall metrics under-claim the effect because they are labelled per session — the same session-vs-entry blindness as the position tilt. See the equal-pool section. |
