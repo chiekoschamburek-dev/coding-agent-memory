@@ -438,6 +438,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="how many items use the full-form cap")
     parser.add_argument("--budget", type=int, default=None,
                         help="override the total evidence token budget")
+    parser.add_argument("--max-sessions", type=int, default=None,
+                        help="cap on distinct sessions in one payload "
+                             "(0 = unlimited); the shipped default is 2")
+    parser.add_argument("--cap", type=int, default=None,
+                        help="cap on items returned from one session; the "
+                             "shipped default is 5")
     parser.add_argument("--operative-weight", type=float, default=None,
                         help="weight for operative lines when selecting a window")
     parser.add_argument("--repeats", type=int, default=1,
@@ -555,6 +561,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_full_count"] = args.full_count
     if args.budget is not None:
         overrides["evidence_budget_tokens"] = args.budget
+    if args.max_sessions is not None:
+        overrides["evidence_max_sessions"] = args.max_sessions
+    if args.cap is not None:
+        overrides["max_evidence_per_session"] = args.cap
     if args.operative_weight is not None:
         overrides["evidence_operative_weight"] = args.operative_weight
     if args.listwise_enabled is not None:
