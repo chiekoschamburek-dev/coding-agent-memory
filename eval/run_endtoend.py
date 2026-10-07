@@ -28,6 +28,7 @@ import json
 import os
 import pathlib
 import re
+import statistics
 import sys
 import tempfile
 import time
@@ -242,6 +243,7 @@ def run_condition(
             n_shown = 0
             n_relevant_shown = 0
             answer_shown = False  # no memory is supplied in the baseline condition
+            answer_positions: list[int] = []
             if with_memory:
                 user_id = _user_for_repo(memories, question["repo"])
                 response = client.post(
@@ -269,6 +271,20 @@ def run_condition(
                 answer_shown = bool(
                     answer_session and answer_session in shown_sessions
                 )
+                # Where the answer session's first item lands. Emission is
+                # session-blocked, so a third seated session starts around index 11
+                # of ~15: position, not presence, is what a breadth arm actually
+                # changes. Recorded because accuracy follows it - the same decisive
+                # content answered 0.643 when it landed in the first five items and
+                # 0.385 when it landed later (claim anchor, eval/README.md). Presence
+                # alone is not the axis, and a "shown only as a clipped pointer"
+                # distinction was measured and does not hold: 0 of 11 decisive items
+                # at max_sessions=3 reached the 110-token cap, they median ~52 tokens.
+                answer_positions = [
+                    i + 1
+                    for i, item in enumerate(data[:n_shown])
+                    if mapping.get(item["id"]) == answer_session
+                ]
 
             votes: list[int | None] = []
             raws: list[str] = []
@@ -300,6 +316,7 @@ def run_condition(
                     "n_shown": n_shown,
                     "n_relevant_shown": n_relevant_shown,
                     "answer_session_shown": answer_shown,
+                    "answer_session_position": min(answer_positions) if answer_positions else None,
                     "reply": raw[:40],
                 }
             )
@@ -356,18 +373,37 @@ def report(results: dict[str, dict], meta: dict) -> None:
     print("End-to-end Answer evaluation (file localisation, multiple choice)")
     print("=" * 70)
 
-    print(f"{'condition':<20}{'n':>5}{'majority':>10}{'per-pass range':>18}{'unanimous':>11}")
-    print("-" * 64)
+    print(
+        f"{'condition':<20}{'n':>5}{'majority':>10}{'per-pass range':>18}"
+        f"{'unanimous':>11}{'shown':>8}{'med pos':>9}"
+    )
+    print("-" * 85)
     for label, result in results.items():
         spread = f"{result.get('per_pass_min', result['accuracy']):.3f}-{result.get('per_pass_max', result['accuracy']):.3f}"
+        outs = result.get("outcomes") or []
+        if outs:
+            shown = sum(1 for o in outs if o.get("answer_session_shown")) / len(outs)
+            positions = [
+                o["answer_session_position"]
+                for o in outs
+                if o.get("answer_session_position")
+            ]
+            med = f"{statistics.median(positions):.0f}" if positions else "-"
+            cols = f"{shown:>8.3f}{med:>9}"
+        else:
+            cols = f"{'-':>8}{'-':>9}"
         print(
             f"{label:<20}{result['n']:>5}{result['accuracy']:>10.3f}"
-            f"{spread:>18}{result.get('unanimous_rate', 1.0):>11.3f}"
+            f"{spread:>18}{result.get('unanimous_rate', 1.0):>11.3f}{cols}"
         )
     print()
     print("  'majority' aggregates repeats per question; 'per-pass range' is the")
     print("  spread across individual passes. A wide range means the answer model is")
     print("  not deterministic and single-pass numbers would be noise.")
+    print("  'shown' = the answer session appears among the returned items; 'med pos' =")
+    print("  median index of its first item. They are different quantities: a breadth")
+    print("  arm raises 'shown' while pushing the answer later, and accuracy follows")
+    print("  the position. Read both before crediting reach.")
 
     if "no_memory" in results and "with_memory" in results:
         base = results["no_memory"]["accuracy"]
