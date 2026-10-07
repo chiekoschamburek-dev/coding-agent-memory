@@ -223,7 +223,7 @@ def main() -> int:
     print("\nclaim-level payload quality (the new instrument):")
     for name, pred in (
         ("hit  (gold claim present)", lambda r: r["hit"]),
-        ("purity == 1 (no rival claim)", lambda r: r["hit"] and r["purity"] == 1),
+        ("purity == 1 (no rival claim)", lambda r: r["purity"] == 1),
         ("decidable_claim = hit AND pure", lambda r: r["hit"] and r["purity"] == 1),
     ):
         rate = sum(1 for r in usable if pred(r)) / len(usable)
