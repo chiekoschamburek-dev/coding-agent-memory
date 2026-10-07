@@ -20,7 +20,7 @@ which is what the contract requires before returning HTTP 200.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 PRAGMA foreign_keys = ON;
@@ -109,7 +109,12 @@ CREATE TABLE IF NOT EXISTS memory (
     ord         INTEGER NOT NULL,
     superseded_by INTEGER REFERENCES memory(id),
     created_at  TEXT NOT NULL,
-    UNIQUE (user_id, sha)
+    -- Dedupe within a session only. Deduping across sessions (the original
+    -- UNIQUE (user_id, sha)) silently attributed shared text to whichever
+    -- session first wrote it, dropping provenance for every later session
+    -- that quoted it (~14% of benchmark rows) — the session-major assembler
+    -- then emitted the wrong session block for a matching query.
+    UNIQUE (user_id, session_id, sha)
 );
 CREATE INDEX IF NOT EXISTS ix_memory_user ON memory(user_id);
 CREATE INDEX IF NOT EXISTS ix_memory_user_ts ON memory(user_id, ts);

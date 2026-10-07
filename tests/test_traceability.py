@@ -23,6 +23,7 @@ Source timestamp used throughout: 2024-01-01T00:00:00Z.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 ADDED = """We investigated a slow checkout page in the payments service.
@@ -216,3 +217,37 @@ def test_relevant_window_is_preferred_over_the_opening(client):
     assert "src/parser/tokenizer.py line 142" in data[0]["content"], (
         "the matching window should be selected over the memory's opening"
     )
+
+
+def test_shared_text_is_attributed_to_each_session(client):
+    """Cross-session provenance: the same chunk text quoted by a second
+    session must produce a memory row attributed to THAT session — not be
+    silently folded into the first writer (the original UNIQUE (user_id, sha)
+    dropped ~14% of benchmark provenance this way)."""
+    shared = ("FATAL: deadlock detected in worker pool because the backoff "
+              "window was miscalculated; fixed by serialising lock acquisition src/x.py")
+    for sid, rid in (("first", "req:1"), ("second", "req:2")):
+        response = client.post("/add", json={
+            "request_id": rid,
+            "user_id": "u1",
+            "session_id": sid,
+            "messages": [
+                {"role": "user", "timestamp": 1,
+                 "content": f"hit a failure today. {shared}"},
+            ],
+        })
+        assert response.status_code == 200
+
+    store = client.app.state.container.store
+    marker = shared[:60].lower()
+    with store._read() as conn:  # noqa: SLF001 - test harness
+        rows = conn.execute(
+            "SELECT session_id, text FROM memory WHERE user_id = 'u1' ORDER BY id"
+        ).fetchall()
+    carriers = [r for r in rows if marker in (r["text"] or "").lower()]
+    attributed = {r["session_id"] for r in carriers}
+    shas = {hashlib.sha256(r["text"].encode()).hexdigest() for r in carriers}
+    assert attributed == {"first", "second"}, (
+        "each session must own its copy of the shared text"
+    )
+    assert len(shas) == 1, "the copies carry identical text"

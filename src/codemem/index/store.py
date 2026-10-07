@@ -139,7 +139,7 @@ class Store:
                 conn.execute(
                     "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    ("1",),
+                    ("2",),
                 )
             finally:
                 conn.close()
@@ -354,7 +354,8 @@ class Store:
         ``text`` is the generated overview, which FTS and the dense channel
         index like any memory. Identity is the content hash, so a re-Add of the
         same session (same overview) deduplicates through
-        ``UNIQUE (user_id, sha)`` and never pays for the row twice. Returns the
+        deduplicated per session (``UNIQUE (user_id, session_id, sha)``) — the
+        same overview is never stored twice for one session. Returns the
         new memory id, or ``None`` when the row already existed.
 
         Called from the enrichment pass, which never raises into Add: a failure
