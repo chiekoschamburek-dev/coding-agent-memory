@@ -120,6 +120,63 @@ two retained flags are the ready levers for exactly that regime
 supports both there). If the deployment or a future evaluation cycle sends
 option-less queries, re-enable and re-measure before concluding anything.
 
+## 2a-ter. What 2026-10-07 closed, and the one figure that moved
+
+Fourteen further arms were measured the same day (five bonus-table arms,
+six session-budget arms, three answer-metric arms) and **none changed the
+shipped configuration**. What they bought is the closure of four questions
+and the correction of one number:
+
+- **`INTENT_KIND_BONUS` stays.** The pairing shows `code` as the only
+  per-entry feature where gold beats the entry that outranked it (+31.3 pp
+  net) and `diff` sitting on the winner's side (−24.2 pp), which reads as a
+  mis-pointed table. Replaying five tables moves 440-464 of ~1 000 candidate
+  ranks and no outcome: `head_is_gold` spans 0.117-0.135, `gold_in_window`
+  0.159-0.168, all p≥0.25. A lever that produces rank churn without outcomes
+  is a wash, not an error. This also refutes "prefer action records" a third
+  time, and the `dense_sim` row (−46.5 pp) forecloses the whole similarity
+  family — the reason the cross-encoder widens the gold gap rather than
+  closing it.
+- **`evidence_max_sessions=2` stays, on a different argument.** Its own
+  instrument now supports the *unlimited* arm's rejection (+1/−8 decidable,
+  p=0.039; ambiguity +10/−0, **p=0.002**) but the shipped value is not the
+  peak — `max_sessions=1` scores higher on `decidable` (0.633 vs 0.600). On
+  the answer metric the two are a wash (+2/−3, p=1.000) because the setting
+  is a **reach ↔ conversion dial**: narrowing to one session forfeits 20 pp
+  of reach (0 gained / 14 lost, p=0.0001) to buy ~6 pp of conversion.
+  The reason to keep 2 is that its maximum regret across every plausible
+  answer-prefix length (0.034) is half either neighbour's (0.066) — under
+  the platform's unpublished real prefix, 2 is the only arm never worse than
+  0.600. The old justification ("companion move to cap 5") is superseded.
+- **Abstention is closed as an algorithmic option.** Because accuracy on
+  questions whose answer session is missing (0.175) sits *below* the
+  no-memory floor (0.243), withholding would be worth +0.039 — but no
+  absolute quantity the max-normalisation discards predicts it (IDF sum 0.403,
+  BM25 0.563, dense 0.500, rerank logit 0.487, AUC floor ~0.64 at n=70).
+  Resemblance is not presence. The prize is index-side only, which is the
+  §5 parked recall work, and now the only remaining algorithmic surface.
+- **`evidence_full_count` stays at 8.** Rendering the second session as
+  pointers cuts payload tokens 28 % and improves the proxy (+1/−0) with an
+  exactly identical answer outcome (0.329 → 0.329, reach and acc-on-shown
+  unchanged). Side product: part of `decidable`'s ambiguity penalty is a
+  string-parser artifact, not measured model confusion.
+
+**The figure that moved.** The per-session dedup fix (`7203a49`) shifted the
+shipped evidence arm from the recorded **decidable 0.567 / ambiguous 0.300**
+to **0.600 / 0.233**, with `decisive_present` and `session_retrieved`
+unchanged. §3's numbers below that quote 0.567 predate it.
+
+**A reading-frame change, not cosmetic.** Accuracy factors as
+`P(shown) × acc|shown + P(absent) × acc|absent`, and the two factors move in
+opposite directions under every presentation lever tried so far. Aggregate
+accuracy therefore hides significant component moves (a p=0.0001 reach drop
+presented as a p=1.000 accuracy verdict). Strata must be intersected before
+comparing acc-on-shown across arms: the ms=1 shown set is a strict subset of
+ms=2's, which is what made the conversion gain look like +15.5 pp when the
+matched comparison is +6.3 pp. `pool_sessions` predicts correctness
+independently of reach (p=0.011, holds in both strata) and is the covariate
+to block future arms on.
+
 ## 2b. One-shot reality
 
 There is **no platform-feedback loop this cycle**: one Full evaluation, no
@@ -196,6 +253,15 @@ multiple-comparisons burden.
 
 ## 5. Parked (with reasons)
 
+- **Admission-side recall work** (`entity_timeline` / `supersedes` are
+  scaffolded and inactive): with abstention closed (§2a-ter) and every
+  presentation lever measured flat, the only untried surface is **how a
+  session becomes eligible at all** — 39.6 % of relevant pairs have a gold
+  chunk in the pool and the missing 40/70 questions are not detectable from
+  the score. Shape of the attempt: a session-level identifier/timeline
+  channel that can admit where lexical and entity scoring did not, using no
+  model and generating no text, so it does not touch card invariant 5 or the
+  §8 no-answer rule.
 - **Issue-language card overview** (HyDE-style: describe the problem the
   session solves, in issue vocabulary): the justification **shifted from
   digest quality to recall**. The claim anchor's binding constraint is

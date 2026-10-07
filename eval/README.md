@@ -2586,10 +2586,181 @@ the wrong way), while the payload shrinks 1 840 -> 1 637 tokens. So the tilt get
 and promotion puts it *first*; the proxy's "gold emitted" axis can only see the
 former, which is why it read as redundancy. Both stay on.
 
+### What beats a gold chunk is not a weight, and the kind bonus is a wash (2026-10-07)
+
+`scripts/replay_kind_bonus.py`, `eval/results/kind_bonus.json`. Two measurements.
+
+**The pairing.** For every query whose top-ranked entry is not gold, take the best
+admitted gold chunk of a losing relevant session against the entry that actually beat it
+(`eval/results/entry_level.json`; 99 pairs over 38 queries — note the dumped `detail` is a
+20.3 % slice of the pool, so this is a paired comparison, not a full-pool replay):
+
+| statistic | gold wins | gold loses | net |
+|---|---|---|---|
+| `kind == code` | 45.5 % | 14.1 % | **+31.3 pp** |
+| `entity_signal` | 18.2 % | 20.2 % | −2.0 pp |
+| `kind == diff` | 1.0 % | 25.3 % | −24.2 pp |
+| `base` (RRF) | 19.2 % | 80.8 % | −61.6 pp |
+| `strength` | 11.1 % | 78.8 % | −67.7 pp |
+| `dense_sim` | 19.2 % | 65.7 % | −46.5 pp |
+
+The margins say it plainly: gold is a `code` chunk 62.6 % of the time and a `diff` 1.0 %;
+the winner is a `diff` 25.3 % of the time. A gold session is usually a **read of the file
+the task touched**, and what outranks it is usually an **edit of some other file**. This
+refutes the "prefer action records" intuition for the third time (after
+`operative_rank_weight`, §III above, and promotion applied to every session) and it is
+*not* evidence that the bonus table is mis-pointed — see the replay. The `dense_sim` row is
+the more load-bearing one: a fifth **similarity** feature cannot work, which is exactly the
+mechanism behind the cross-encoder widening the gap instead of closing it (+0.221 → +0.324,
+§II). Even the relevance label itself points the wrong way — the winning session carries
+*more* file overlap than the losing relevant one (mean 1.49 vs 1.38 over 39 structural
+pairs), i.e. the system is correctly ranking a mis-specified target.
+
+**The replay.** Five arms, one corpus build, intent census debug 66 / general 19 / develop 4:
+
+| arm | head_is_gold | gold in window | ranks moved |
+|---|---|---|---|
+| diff harder (stacktrace 1.25 / diff 1.30 / log 1.15) | 0.1171 | **0.1682** | 423 / 1 072 |
+| **shipped** | 0.1261 | 0.1652 | — |
+| code up under `debug` only (code 1.15, action kinds flat) | 0.1261 | 0.1592 | 456 / 876 |
+| code up under both intents | 0.1321 | 0.1622 | 464 / 877 |
+| every bonus off | **0.1351** | 0.1622 | 440 / 1 013 |
+
+`head_is_gold` orders monotonically exactly as the pairing predicts, and nothing converts:
+the largest paired movement is +4/−1 (p=0.375; `diff-harder` 0/−3, p=0.25), `gold_in_window`
+is flat-to-worse for every arm — and the only arm that *raised* it strengthened the shipped
+direction — while `gold_admitted` is byte-identical across all five (0.3964), correct by
+construction because admission is the informative-channel gate, and confirmation that the
+arms touched nothing but the score. The rank-sensitivity column exists so this null cannot
+be waved away as an instrument blind spot: **440 of 1 013 dumped entries change rank**
+(mean |Δrank| 4.5) and no outcome moves. Verdict: the bonus is a ±1.8 pp exchange between
+`head_is_gold` and `gold_in_window`, not a mis-pointed lever. Table stays as shipped.
+
+**The funnel that makes this unsurprising** (shipped arm; denominator = the 132 of 333
+relevant pairs with a pooled gold entry): admitted for scoring **100.0 %**, present in a
+payload with the session budget lifted **81.1 %**, emitted under the shipped
+`evidence_max_sessions=2` **41.7 %**. Every scoring formula — existing, proposed, or
+measured today — acts on the first step. One policy constant owns the second, and no arm
+moved it by more than 0.8 pp.
+
+### `evidence_max_sessions` is a reach ↔ conversion dial; 2 is the minimax choice (2026-10-07)
+
+Re-run on current code (post `7203a49`), cap 5, `run_evidence.py` 30 q. Cells are
+`decidable / ambiguous`, columns are how much of the payload the answer model reads:
+
+| max_sessions | @1 000 | @2 000 | @4 000 | @8 000 | whole | items | tokens |
+|---|---|---|---|---|---|---|---|
+| 1 | 0.567/0.067 | 0.633/0.067 | **0.633**/0.067 | **0.633**/0.067 | **0.633**/0.067 | 4.9 | 1 302 |
+| **2 (shipped)** | 0.600/0.067 | 0.633/0.200 | 0.600/0.233 | 0.600/0.233 | 0.600/0.233 | 9.6 | 2 340 |
+| 3 | **0.633**/0.100 | **0.667**/0.233 | 0.567/0.333 | 0.567/0.333 | 0.567/0.333 | 13.7 | 2 689 |
+| 4 | **0.633**/0.100 | **0.667**/0.233 | 0.567/0.333 | 0.533/0.367 | 0.533/0.367 | 17.7 | 2 998 |
+| 6 | **0.633**/0.100 | **0.667**/0.233 | 0.533/0.367 | 0.500/0.400 | 0.500/0.400 | 24.6 | 3 565 |
+| 0 (unlimited) | **0.633**/0.100 | **0.667**/0.233 | 0.500/0.400 | 0.400/0.533 | 0.367/0.567 | 78.9 | 8 046 |
+
+Paired against the shipped arm: unlimited is **significantly worse** — decidable +1/−8
+(p=0.039), ambiguity +10/−0 (**p=0.002**) — while `decisive_present` rises 0.767 → 0.867.
+This is the reach-buys-confusion law reproduced on the *deterministic* instrument. (The
+2026-09-26 sweep recorded the shipped arm at 0.567/0.300; on current code it is 0.600/0.233,
+`decisive_present` and `session_retrieved` unchanged — the improvement is attributable to the
+per-session dedup fix, and the tables above that quote 0.567 are pre-fix.)
+
+**Two readings that matter more than the peak.** First, **arm ordering inverts with prefix
+length**: at 1 000–2 000 tokens wider is better (0.633–0.667, and ms=1 is the *worst* at
+@1 000), beyond 4 000 narrower is better and unlimited collapses. So this constant is a bet
+on the platform's real prefix, which `api_guide.md` does not state and this file does not
+know. Second, on **maximum regret over the ladder** ms=2 is the unique lowest arm (0.034,
+against 0.066 for both neighbours, 0.100 / 0.133 / 0.266 for 4 / 6 / 0): it is never the
+best cell in any column and never worse than 0.600 in any. That robustness — not the
+"companion move to cap 5" story in `config.py` — is the defensible reason it stays.
+
+**Answer-metric price** (claim-tune anchor, 70 q × 5, `run_endtoend.py` + the new
+`--max-sessions` / `--cap` flags; earlier e2e runs could not sweep these constants at all):
+
+| arm | accuracy | reach (answer session shown) | acc \| shown | acc \| absent |
+|---|---|---|---|---|
+| ms=2 (shipped) | 0.329 | 30/70 = 42.9 % | 0.533 | **0.175** |
+| ms=1 | 0.314 | 16/70 = 22.9 % | 0.688 | 0.204 |
+
+Accuracy is a wash (+2/−3, p=1.000) hiding a significant component move: reach drops 20 pp
+with **0 gained / 14 lost, p=0.0001** — the strongest significance recorded in this repo.
+`decidable` preferred ms=1 because it measures conversion only; on the reading above it is
+right that conversion improves and wrong that this is free.
+
+**Correction, and the reading frame it forces.** ms=1's shown set is a *strict subset* of
+ms=2's (16 ⊂ 30, ms1-only = 0), so `acc | shown` compares different question sets: on the 16
+shared questions it is 0.625 → 0.688 (**+6.3 pp**, not the +15.5 pp the marginals suggest),
+and the 14 questions ms=1 forfeits were scoring 0.429 under ms=2. Accuracy factors as
+`P(shown) × acc|shown + P(absent) × acc|absent`, and this decomposition checks out
+arithmetically (0.429×0.533 + 0.571×0.175 = 0.329). **Future arms must report both
+components and intersect the strata** — the aggregate is a product of two terms that the
+session budget moves in opposite directions, which is how a p=0.0001 effect shows up as a
+p=1.000 verdict.
+
+### No absolute quantity predicts that we have no answer (2026-10-07)
+
+`scripts/abstention_probe.py` (Search only — no relay, so the idea was priced before any
+answer calls were spent). The arbitrage that motivated it: when the answer session is
+absent the model scores **0.175**, *below* the recorded no-memory floor 0.243, so on those
+40 of 70 questions our payload is worse than nothing; perfect withholding would be worth
+40/70 × (0.243 − 0.175) = **+0.039 accuracy**. It is unreachable from the score.
+
+| statistic (all absolute, all discarded by max-normalisation) | AUC \| reach | AUC \| correct |
+|---|---|---|
+| `entity_top` (IDF-weighted identifier sum) | 0.403 | 0.408 |
+| `lex_top` (BM25 magnitude) | 0.563 | 0.548 |
+| `rrf_top` | 0.545 | 0.420 |
+| `dense_top` (cosine) | 0.500 | 0.500 |
+| `rerank_logit` (pre-sigmoid) | 0.487 | 0.542 |
+| `pool_sessions` / `emitted_items` / `tokens` | 0.521 / 0.552 / 0.512 | **0.688** / 0.453 / 0.559 |
+
+At n=70 with a 30/40 split the AUC standard error is ≈0.070, so nothing below ~0.64 is
+detectable at all and nothing on the reach column came close. The mechanism is the project's
+own premise restated: in a same-repository corpus *some* chunk always resembles the question,
+so score magnitude measures **resemblance, not presence** — which is the same reason the
+reach/confusion symmetry holds. Closing abstention as an option; the +0.039 is only
+reachable from the index.
+
+Two by-products worth keeping. **(a) Reproducibility:** the probe, rebuilt offline from
+`benchmark.json`, reproduced the recorded `answer_session_shown` on **70/70 questions**, so
+the deterministic path is bit-stable and every future idea can be pre-checked for free
+before spending answer calls. **(b) The one positive signal:** the number of distinct
+sessions reaching the recall pool predicts *correctness*, not reach — U=744, z=2.54,
+p=0.011 (0.066 after Bonferroni over the six statistics), mean 42.5 on correct questions vs
+32.4 on wrong, and **not mediated by reach**: it holds inside both strata (+13.1 shown, +9.6
+absent). It is a query-difficulty covariate rather than a lever — topical diffusion is a
+property of the question, not something the assembler can grant — and the right use is to
+**block future arms on it**, because a large part of n=70's variance is this axis.
+
+### Pointer rendering of the second session: the proxy moves, the model does not (2026-10-07)
+
+The hypothesis was surgical: ms=1's conversion gain suggested the *presence of a second
+session's full text* was the competing assertion, so `evidence_full_count` 8 → 5 should keep
+reach (session two still emitted, so still creditable) while dropping it to 110-token
+pointers. `evidence_full_count` was already exposed on both harnesses, so this cost no code.
+
+The intervention fired: payload **2 340 → 1 690 tokens (−28 %)** with item count unchanged
+(9.63 → 9.60), and on the evidence instrument decidable 0.600 → **0.633** and ambiguity
+0.233 → **0.200**, both one-directional (+1/−0 and +0/−1, zero losses). On the answer
+instrument it is a **null**: accuracy 0.329 → 0.329, reach 42.9 % → 42.9 %, `acc | shown`
+0.533 → 0.533, paired +1/−1, p=1.000.
+
+So session two's *text volume* is not what confuses the answer model — which also means the
+conversion gain attributed to ms=1 was mostly forfeited reach, per the strata correction
+above. And a calibration result worth recording next to the `item_tokens` sweep: the
+`ambiguous` component of `decidable` responds to payload text volume in a way the answer
+model demonstrably does not, so part of the ambiguity penalty this metric has been charging
+multi-session payloads is a **string-parser artifact**, not measured model confusion.
+
 ### Tuning decisions taken from measurements, not intuition
+
 
 | Decision | Evidence |
 |---|---|
+| Keep `INTENT_KIND_BONUS` as shipped (2026-10-07) | The pairing says `code` is the only per-entry feature where gold beats what outranks it (+31.3 pp net) and `diff` is on the winning side (−24.2 pp), yet all five bonus arms convert nothing: 440-464 of ~1 000 dumped entries change rank while `gold_in_window` moves −0.6/+0.3 pp and `head_is_gold` +0.9 pp at best (p≥0.25). An axis that shuffles hundreds of ranks and no outcome is a wash, not a mis-pointing. See the bonus section. |
+| Keep `evidence_max_sessions=2`, justified by minimax regret (2026-10-07) | Six-arm ladder on current code: `decidable` falls monotonically with breadth (0.633 at 1 → 0.367 unlimited) and unlimited is significantly worse than shipped (+1/−8, p=0.039; ambiguity +10/−0, p=0.002). But arm ordering **inverts with prefix length** (wider wins at 1-2 k tokens), so the constant is a bet on an unpublished platform behaviour — and 2 is the unique lowest-regret choice over that uncertainty (0.034 vs 0.066 for both neighbours). On the answer metric it is a reach ↔ conversion dial, net flat. Do not re-propose ms=1 on `decidable` grounds. See the session-budget section. |
+| Abstention on absolute evidence: closed (2026-10-07) | Every quantity that max-normalisation throws away (IDF sum, BM25 magnitude, dense cosine, cross-encoder logit) plus the structural counts sit at AUC 0.40-0.56 for predicting reach, against a ~0.64 detectability floor at n=70. Resemblance is not presence. The +0.039 arbitrage is real but index-side only. See the abstention section. |
+| `full_count` 8 stays; pointer rendering rejected (2026-10-07) | 8 → 5 cuts payload tokens 28 % and improves the proxy (+1/−0 decidable, +0/−1 ambiguity) but leaves accuracy, reach and acc-on-shown byte-equal (paired +1/−1, p=1.0). Second-session text volume is not the source of model confusion. Also calibrates `decidable`: part of its ambiguity penalty is a string-parser artifact. See the pointer section. |
+| Report reach and conversion separately, blocked on `pool_sessions` (2026-10-07) | Accuracy factors as P(shown) x acc-on-shown + P(absent) x acc-on-absent, and the aggregate can stay flat while a component moves at p=0.0001; strata must be intersected (ms=1's shown set is a strict subset of ms=2's, which inflated the apparent conversion gain from +6.3 to +15.5 pp). `pool_sessions` predicts correctness independently of reach (p=0.011; +13.1 / +9.6 within strata) and is the covariate to block on. |
 | Keep session-major emission; reject entry-order assembly (2026-10-02) | Over a byte-identical item set (9.2 entries/query, 0 precision/recall movement), global score order does improve the ordering the platform cuts: item nDCG@10 +0.0190, item MRR +0.0257, both p<0.001 (`scripts/exp_entry_order.py`, S2 vs S0). But the shipped block order carries the position tilt and operative promotion, and on the evidence metric the entry walk without them loses decidable 0.567 → 0.300 (0 gained / 8 lost, p=0.0078; @1k prefix 0.633 → 0.167) with payload size unchanged. The proxy's gain is an order of magnitude smaller than the evidence loss; the walk order is not reopened unless the intra-session levers are ported into it and re-priced on `run_evidence.py`. The no-quota arm confirms the per-session cap is load-bearing (40.3 entries, 20.2/session flooding). |
 | Rerank window resolves with the checkpoint (2026-09-27) | bge-reranker-v2-m3 at the MiniLM-era 512/200 window is a regression against the shipped MiniLM default (decidable 0.567 → 0.400, −8/+3): 76.7 % of Edit/Write/MultiEdit memories exceed 200 tokens, so the budget clips exactly the operative evidence. Opening the window to 2048/800 recovers and passes it (0.633, +9/−2, one-sided p=0.033; entry nDCG@10 p=0.074) at +0.7k payload tokens and a latency price that is hardware-shaped (234 s/search CPU vs ~3 s GPU). So `rerank_max_length` / `rerank_doc_tokens` / `rerank_probability_scores` default to None and resolve per checkpoint (bge-reranker-v2-m3 → 2048/800/on; else 512/200/off); explicit values always win. The proxy's recall metrics under-claim the effect because they are labelled per session — the same session-vs-entry blindness as the position tilt. See the equal-pool section. |
 | Cap 5 per session, at most 2 sessions, multi-span top-1 (2026-09-25) | `decidable@all` 0.400 → 0.500, ambiguity 0.433 → 0.333, mean payload 7 190 → 2 434 tokens (−66 %) with `decidable@2k` unchanged — resolves the cap-3 stand-off by capping *sessions* instead of *slots per session*. Retrieval-proxy numbers elsewhere in this file predate the change; re-derive with `run_benchmark.py` before quoting them. |
