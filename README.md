@@ -99,6 +99,16 @@ cp .env.example .env    # 然后编辑；切勿提交该文件
 | `CODEMEM_MAX_EVIDENCE_PER_SESSION` | `5` | 单会话多样性上限；与 `CODEMEM_EVIDENCE_MAX_SESSIONS` 配套调整，见 `eval/README.md` |
 | `CODEMEM_MIN_EVIDENCE_SCORE` | `0.15` | 噪声门；用 `eval/` 校准 |
 | `CODEMEM_EVIDENCE_BUDGET_TOKENS` | `60000` | 载荷总预算，远低于 117,760 的输入窗口 |
+| `CODEMEM_SESSION_SELECT_LLM` | `true` | 会话级两段选择（默认含 fail-safe 回退）；见 `eval/README.md` |
+| `CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS` | `10` | 选择调用的硬超时 |
+| `CODEMEM_SESSION_SCORE_TOPK` | `1` | 会话分聚合器（2 = top-2 质量，已测代理显著、默认未启） |
+| `CODEMEM_SESSION_FEATURE_FUSION` | `false` | 会话特征融合（代理显著、答案不转化，默认未启） |
+| `CODEMEM_CLAIM_CHANNEL` / `_FLOOR` / `_CAP` | `false` / `0.45` / `3` | claims-only 侧通道（触达↑但答案↓，默认未启） |
+| `CODEMEM_DENSE_ELIGIBLE` | `false` | dense-only 准入（方向正、未过显著线；smoke 窗口 A/B 臂） |
+
+> **部署警告：不要携带本机实验的 `.env` 上 VM。** 任何钉值都会覆盖出厂默认——
+> 曾实测 `MAX_EVIDENCE_PER_SESSION=3` 的旧钉值让部署跑在未被当前结论支持的配置上。
+> VM 上从 `.env.example` 复制并只填 `CODEMEM_API_KEY` 与中继三件套，其余留默认。
 
 **关于模型 Key。** 服务当前完全不需要模型：分块、标识符抽取、BM25、IDF 匹配与融合都是
 确定性且无模型的，因此缺少 Key 不会破坏检索。LLM 增强通道是后续交付项；目前这些配置只被
