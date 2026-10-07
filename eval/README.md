@@ -2058,6 +2058,39 @@ platform ever sends option-less queries. SUBMISSION.md carries this
 boundary so "reach buys confusion" is not misread as a condemnation of
 retrieval in general — it is a property of adversarial MC instruments.
 
+### Span selection off: a null that closes a hypothesis (2026-10-07)
+
+`evidence_item_tokens` raised past the longest chunk (2000 > max_chunk_tokens
+1400; 4000 as sentinel — identical to 2000) with `evidence_full_count=100`
+(everything full-form, span selection effectively disabled), paired against
+the shipped 800/full-8 on the evidence metric. Pre-registered readings, both
+negative:
+
+| arm | decidable | decisive present | ambiguous | payload tokens |
+|---|---|---|---|---|
+| shipped 800 / full 8 | 0.567 | 0.767 | 0.300 | 2 408 |
+| 1200 / full 100 | 0.567 | 0.767 | 0.267 | 3 028 |
+| 2000 / full 100 | 0.567 | 0.767 | 0.267 | 3 261 |
+| 4000 / full 100 | 0.567 | 0.767 | 0.267 | 3 261 |
+
+1. **"选窗一直在扔东西" is false at the current config**: opening the window
+   entirely surfaces zero additional decisive evidence (flat 0.767 across
+   all arms). The confidence-aware multi-span selector at 800 already
+   delivers the decisive content — consistent with the corpus's median
+   chunk being ~151 characters, far inside the window.
+2. **The old "1200 starts pulling distractor modifications" observation
+   does not reproduce** under the shipped configuration (ambiguity flat,
+   if anything −1/−2). That measurement predates the multi-span redesign;
+   under it, window width is simply not a live variable. The predicted
+   reach↔confusion signature (both rising) never triggered — nothing rose.
+3. 4000 ≡ 2000 to the digit, confirming the ceiling: no chunk exceeds
+   ~1400 tokens, so windows past that are no-ops.
+
+Verdict: keep 800 (the +35 % payload buys nothing), and record that
+window width stopped being a live variable after the multi-span redesign.
+Also removed in this change: `chunk_overlap_tokens` — a config field no
+code has ever read, deleted to stop it implying an effect.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items

@@ -111,7 +111,6 @@ class Settings:
     # Code fences are never cut mid-line; this is the hard cap that forces a
     # split at line boundaries for pathological blobs.
     hard_chunk_chars: int = 24_000
-    chunk_overlap_tokens: int = 32
 
     # ---- evidence assembly --------------------------------------------
     evidence_full_count: int = 8  # items rendered in full form
