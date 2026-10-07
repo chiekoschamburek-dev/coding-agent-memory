@@ -729,6 +729,104 @@ def assemble(
     # weaker session while still being the better thing to show first.
     ceiling = float("inf")
 
+    if settings.evidence_session_interleave:
+        # Round-robin slotting: each seated session's next chunk takes the next
+        # slot, so the heads of the 2nd and 3rd seated sessions land inside the
+        # full-form window instead of behind the first session's tail. Tests the
+        # within-arm position gradient (decisive content answering 0.643 in the
+        # first five slots vs 0.385 past them) as a between-arm lever, which is
+        # the one ordering change never run. `assemble`'s block loop below is
+        # deliberately left untouched — the emission body here is a copy, not a
+        # refactor, so the shipped path stays byte-identical with the flag off.
+        queues: list[list[Candidate]] = []
+        seated = 0
+        for session_index, session_id in enumerate(order):
+            if max_sessions and seated >= max_sessions:
+                break
+            group = groups[session_id]
+            # Same abstain rule as the block path: the head decides, and the
+            # first seated session is exempt because abstaining is only defined
+            # once something has been emitted.
+            if session_index and group[0].final < settings.min_evidence_score:
+                break
+            if settings.evidence_position_weight:
+                span = spans.get(session_id)
+                if span is not None:
+                    group = _position_ordered(
+                        group, span, settings.evidence_position_weight
+                    )
+            promote = settings.evidence_operative_promotion
+            if promote < 0 or session_index < promote:
+                group = _role_ordered(group, source_of)
+            if settings.intra_session_order_weight > 0:
+                group = _query_ordered(
+                    group, memories, source_of, plan.keywords,
+                    settings.intra_session_order_weight,
+                )
+            members = [
+                c
+                for c in group
+                if memories[c.memory_id].kind != "card"
+            ]
+            if not members:
+                continue  # a card-only session seats nothing, as in the block path
+            queues.append(members)
+            seated += 1
+
+        taken = [0] * len(queues)
+        stop = False
+        while not stop:
+            progressed = False
+            for qi, queue in enumerate(queues):
+                if not queue or taken[qi] >= session_cap or len(items) >= top_k:
+                    continue
+                cand = queue.pop(0)
+                memory = memories[cand.memory_id]
+                full_form = len(items) < settings.evidence_full_count
+                budget_for_item = (
+                    settings.evidence_item_tokens
+                    if full_form
+                    else settings.evidence_ptr_tokens
+                )
+                operative_weight = (
+                    settings.evidence_operative_weight if qi < 1 else 0.0
+                )
+                content, truncated = _select_span(
+                    source_of[cand.memory_id],
+                    budget_for_item,
+                    plan.keywords,
+                    operative_weight,
+                )
+                if content in seen:
+                    continue
+                seen.add(content)
+                item_tokens = count_tokens(content)
+                if items and used + item_tokens > budget:
+                    stop = True
+                    break
+                used += item_tokens
+                score = min(cand.final, ceiling)
+                ceiling = score
+                items.append(
+                    EvidenceItem(
+                        memory_id=memory.id,
+                        content=content,
+                        score=round(score, 6),
+                        created_at=_iso_from_ms(memory.ts) or memory.created_at,
+                        tokens=item_tokens,
+                        truncated=truncated,
+                        superseded=memory.superseded_by is not None,
+                    )
+                )
+                taken[qi] += 1
+                progressed = True
+            if not progressed and not stop:
+                break
+
+        for idx, item in enumerate(items):
+            item.score = round(max(item.score - idx * 1e-5, 1e-6), 6)
+        return items
+
     for session_index, session_id in enumerate(order):
         if max_sessions and sessions_used >= max_sessions:
             break

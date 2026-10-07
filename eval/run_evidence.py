@@ -388,6 +388,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="lift intra-session emission order by query-keyword "
                              "coverage: final x (1 + w x coverage). Within-session "
                              "only; cannot change which sessions emit")
+    parser.add_argument("--interleave", action="store_true",
+                        help="slot the seated sessions round-robin (heads first) "
+                             "instead of session-blocked, so a later session's "
+                             "head reaches the full-form window; redistribution "
+                             "test, off by default")
     parser.add_argument("--session-select-llm", action="store_true",
                         help="two-stage session selection: one gpt-4o-mini "
                              "call picks the two sessions that record the "
@@ -458,6 +463,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_select_llm"] = True
     if getattr(args, "intra_session_order_weight", None) is not None:
         overrides["intra_session_order_weight"] = args.intra_session_order_weight
+    if args.interleave:
+        overrides["evidence_session_interleave"] = True
     if args.max_sessions is not None:
         overrides["evidence_max_sessions"] = args.max_sessions
     if args.cap is not None:

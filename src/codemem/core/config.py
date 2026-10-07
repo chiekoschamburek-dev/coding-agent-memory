@@ -170,6 +170,22 @@ class Settings:
     # menu is saturated (97.1 % top-8) while only 13.5 % of gold chunks are
     # emitted: the head score picks sessions, not content. Off by default.
     intra_session_order_weight: float = 0.0
+    # Round-robin slotting across the seated sessions: session heads first, then
+    # each session's second chunk, and so on. Emission is session-blocked by
+    # default, so a third seated session starts at about index 11 of 15 and its
+    # head never reaches the full-form window. Tested 2026-10-07 and rejected: it
+    # raises ambiguity exactly where the payload is read first. At cap 5 / 2
+    # sessions the first 1 000 tokens go 0.600 -> 0.567 decidable with ambiguity
+    # 0.067 -> 0.200, and at 3 sessions every prefix column loses (0.633 -> 0.567
+    # at @1 000 with 0.100 -> 0.267 ambiguous; whole payload 0.567 -> 0.533,
+    # +1/-2). The pre-registered gate was "decidable up and ambiguity not up", and
+    # it failed at both budgets, so no answer-metric calls were spent on it.
+    # Blocking is therefore not an accident of implementation: putting one candidate
+    # answer in front at a time is what holds the dominant error mode down - the
+    # same finding that caps `evidence_operative_promotion` at 2 and that measured
+    # promotion-for-every-session at ambiguity 0.567. Kept switchable, off, because
+    # the trade could flip if the platform's real answer prefix turns out generous.
+    evidence_session_interleave: bool = False
     # Claims-only dense side-channel: a non-competing entry for claim prose.
     # The claim chunks never pool (15.7 %) and the menu is saturated (97.1 %),
     # so dense_eligible-style competition was measured dead — this channel
@@ -599,6 +615,10 @@ class Settings:
         put(
             "intra_session_order_weight",
             _env_float("CODEMEM_INTRA_SESSION_ORDER_WEIGHT", 0.0),
+        )
+        put(
+            "evidence_session_interleave",
+            _env_bool("CODEMEM_SESSION_INTERLEAVE", False),
         )
         put("claim_channel", _env_bool("CODEMEM_CLAIM_CHANNEL", False))
         put(

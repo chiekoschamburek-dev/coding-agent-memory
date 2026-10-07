@@ -2821,6 +2821,45 @@ half is not a retrieval problem. The ceiling arithmetic that made reach look wor
 (100 % reach × acc|shown 0.533) fails because `acc|shown` is not invariant in reach —
 the marginal questions ms=3 newly serves convert at 0.100, below the 0.243 floor.
 
+### Round-robin emission: pre-registered, failed the gate, cost no answer calls (2026-10-07)
+
+The one ordering change never run. Session-blocked emission puts a third seated
+session's head at about index 11 of 15, so `evidence_session_interleave`
+(`CODEMEM_SESSION_INTERLEAVE`, off) slots the seated sessions round-robin instead —
+heads first, then each session's second chunk. It reads the within-arm position
+gradient (0.643 early vs 0.385 late) as a *lever* rather than a correlate, and its
+pre-registered gate was **decidable up and ambiguity not up**, checked on the
+deterministic instrument before any relay spend.
+
+Safety of the shipped path first: with the flag off the new code path is dead, and
+that was verified rather than assumed — 153 tests pass, and re-running the shipped
+configuration reproduces the recorded arm byte-for-byte (`decidable` 0.6000,
+ambiguity 0.2333, `decisive_present` 0.7667, 9.6333 items, 2 340.13 tokens — every
+field equal to `ms_2.json`).
+
+`decidable / ambiguous` by how much of the payload is read (cap 5, 30 q):
+
+| prefix | ms=2 blocked | ms=2 interleaved | ms=3 blocked | ms=3 interleaved |
+|---|---|---|---|---|
+| @1 000 | **0.600**/0.067 | 0.567/**0.200** | **0.633**/0.100 | 0.567/**0.267** |
+| @2 000 | **0.633**/0.200 | 0.567/0.200 | **0.667**/0.233 | 0.567/0.300 |
+| @4 000 | 0.600/0.233 | 0.600/0.233 | 0.567/0.333 | 0.533/0.400 |
+| whole | 0.600/0.233 | 0.600/0.233 | 0.567/0.333 | 0.533/0.400 |
+
+The gate fails at both budgets, and it fails in the direction the ambiguity story
+predicts: mixing sessions into the leading slots raises ambiguity **where the reader
+looks first** (0.067 → 0.200 at @1 000 with two sessions; 0.100 → 0.267 with three),
+while the whole-payload view at ms=2 does not move at all (+0/−0, p=1.0) — another
+instance of an order-sensitive effect being invisible in the aggregate, and the reason
+the prefix ladder is the right read for any ordering arm.
+
+So session-blocking is load-bearing, not incidental: showing **one candidate answer at
+a time in front** is what keeps the dominant error mode down. That is the same
+mechanism that caps `evidence_operative_promotion` at 2 (promoting every session's
+operative chunk measured ambiguity 0.567) and the same one behind the reach/confusion
+law, now reproduced in the ordering dimension. No answer-metric arm was run, saving the
+~350 relay calls the pre-check exists to avoid spending.
+
 ### Tuning decisions taken from measurements, not intuition
 
 
@@ -2830,6 +2869,7 @@ the marginal questions ms=3 newly serves convert at 0.100, below the 0.243 floor
 | Keep `evidence_max_sessions=2`, justified by minimax regret (2026-10-07) | Six-arm ladder on current code: `decidable` falls monotonically with breadth (0.633 at 1 → 0.367 unlimited) and unlimited is significantly worse than shipped (+1/−8, p=0.039; ambiguity +10/−0, p=0.002). But arm ordering **inverts with prefix length** (wider wins at 1-2 k tokens), so the constant is a bet on an unpublished platform behaviour — and 2 is the unique lowest-regret choice over that uncertainty (0.034 vs 0.066 for both neighbours). On the answer metric the whole axis is flat (0.314 / 0.329 / 0.314 at ms=1/2/3) and now we know why: reach climbs 22.9 → 57.1 % while acc-on-shown falls 0.688 → 0.425, and the matched comparison shows **redistribution, not addition** — the 14 questions served early at ms=2 are the same 14 at ms=3 and lose 14.3 pp, while 13 served late gain 15.3 pp without changing position. Do not re-propose ms=1 on `decidable` grounds, and do not propose ms=3 as a reach play. See the session-budget section. |
 | Abstention on absolute evidence: closed (2026-10-07) | Every quantity that max-normalisation throws away (IDF sum, BM25 magnitude, dense cosine, cross-encoder logit) plus the structural counts sit at AUC 0.40-0.56 for predicting reach, against a ~0.64 detectability floor at n=70. Resemblance is not presence. The +0.039 arbitrage is real but index-side only. See the abstention section. |
 | `full_count` 8 stays; pointer rendering rejected (2026-10-07) | 8 → 5 cuts payload tokens 28 % and improves the proxy (+1/−0 decidable, +0/−1 ambiguity) but leaves accuracy, reach and acc-on-shown byte-equal (paired +1/−1, p=1.0). Second-session text volume is not the source of model confusion. The stronger version of the same idea — that breadth arms buy *nominal* reach because late items are clipped to 110-token pointers — was tested and **falsified**: 0 of 11 decisive items in the pointer zone hit the cap (median ~52 tokens), because memory entries here median 151 characters. The `shown_full` column built to check it was removed rather than kept. Also calibrates `decidable`: part of its ambiguity penalty is a string-parser artifact. See the pointer section. |
+| Round-robin emission rejected on the pre-registered gate (2026-10-07) | `evidence_session_interleave` (off) slots seated sessions round-robin so later session heads reach the full-form window. Gate: decidable up AND ambiguity not up, on the deterministic instrument. Failed at both budgets — @1 000 0.600→0.567 with ambiguity 0.067→0.200 at two sessions, 0.633→0.567 with 0.100→0.267 at three. Whole-payload view at ms=2 moves +0/−0, so only the prefix ladder sees it. No answer calls spent. Flag retained off, and the shipped path was verified byte-identical rather than assumed. See the round-robin section. |
 | Admission-side recall work: closed by measurement, not deferred (2026-10-07) | With `gold_claim` as exact ground truth (verbatim-verified 70/70), the decisive sentence is in the recall pool and admitted for scoring for **70 of 70** claim-anchor questions, yet in the payload for 27. Of the 40 questions where the answer session is not shown, **0** have the content outside the pool. An eligibility channel therefore has a failure count of zero to attack. The contrary figure this file cites elsewhere (40.5 % of gold chunks reaching the pool) is a file-overlap-anchor measurement, and that anchor's label prefers the distractor (1.49 vs 1.38). See the bottleneck section. |
 | Report reach and conversion separately, blocked on `pool_sessions` (2026-10-07) | Accuracy factors as P(shown) x acc-on-shown + P(absent) x acc-on-absent, and the aggregate can stay flat while a component moves at p=0.0001; strata must be intersected (ms=1's shown set is a strict subset of ms=2's, which inflated the apparent conversion gain from +6.3 to +15.5 pp). `pool_sessions` predicts correctness independently of reach (p=0.011; +13.1 / +9.6 within strata) and is the covariate to block on. |
 | Keep session-major emission; reject entry-order assembly (2026-10-02) | Over a byte-identical item set (9.2 entries/query, 0 precision/recall movement), global score order does improve the ordering the platform cuts: item nDCG@10 +0.0190, item MRR +0.0257, both p<0.001 (`scripts/exp_entry_order.py`, S2 vs S0). But the shipped block order carries the position tilt and operative promotion, and on the evidence metric the entry walk without them loses decidable 0.567 → 0.300 (0 gained / 8 lost, p=0.0078; @1k prefix 0.633 → 0.167) with payload size unchanged. The proxy's gain is an order of magnitude smaller than the evidence loss; the walk order is not reopened unless the intra-session levers are ported into it and re-priced on `run_evidence.py`. The no-quota arm confirms the per-session cap is load-bearing (40.3 entries, 20.2/session flooding). |

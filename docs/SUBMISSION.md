@@ -289,14 +289,18 @@ multiple-comparisons burden.
   and honestly labelled: the 13 questions where correct content was served and the model
   still answered wrong are an answer-model problem, and the redistribution result above
   says no presentation knob on this axis turns them.
-- **Item-level interleaving of the seated sessions** (round-robin emission: each session's
-  head first, then each session's second) is the one ordering change that has never been
-  run. It is tempting because accuracy correlates with position within an arm (0.643 early
-  vs 0.385 late), **but that correlation is confounded** — items are early because their
-  session scored highest — and the between-arm evidence just contradicted primacy as the
-  explanation. Pre-register it as a redistribution test, not a reach test, and read the
-  early/late strata separately. Run on `run_evidence.py` and the bottleneck probe first;
-  neither costs an answer call.
+- **Item-level interleaving of the seated sessions — run 2026-10-07 and rejected on its
+  own pre-registered gate.** `evidence_session_interleave` (off, `CODEMEM_SESSION_
+  INTERLEAVE`) slots seated sessions round-robin so a later session's head reaches the
+  full-form window. Gate: decidable up AND ambiguity not up, measured on the
+  deterministic instrument before any relay spend. It failed at both budgets: at @1 000
+  tokens, 0.600 → 0.567 with ambiguity 0.067 → 0.200 (two sessions) and 0.633 → 0.567
+  with 0.100 → 0.267 (three). So the shipped session-blocking is load-bearing —
+  one candidate answer in front at a time is what holds the dominant error mode down,
+  the same reason `evidence_operative_promotion` is capped at 2. Zero answer calls were
+  spent on it, which is what the pre-check is for. The shipped path was verified
+  byte-identical with the flag off (153 tests; the recorded arm reproduces to the digit),
+  not assumed.
 - **Issue-language card overview** (HyDE-style: describe the problem the
   session solves, in issue vocabulary): the justification **shifted from
   digest quality to recall**. The claim anchor's binding constraint is
