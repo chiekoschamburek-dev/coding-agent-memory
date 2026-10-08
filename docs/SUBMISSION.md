@@ -254,10 +254,18 @@ exactly 1.0000; worst of 2 583 negatives 0.9677), and at tau 0.97 the per-query 
 count agrees with the verbatim label on 70/70, firing on exactly the 35 conflicted
 queries. So **conflict-collapse** — when the payload commits to two or more options, drop
 the claim-bearing items rather than trust any of them — is buildable and is the one
-untried candidate with a mechanism in its favour. Three limits, stated as firmly as the
-idea: it has never been run; the no-conflict accuracy of 0.600 that motivates it rests on
-**n=5**; and the 3.2 % usable tau band exists only while options are verbatim corpus text,
-so the threshold must be re-validated against any question set that paraphrases. The
+untried candidate with a mechanism in its favour — and the candidate whose value this
+cycle's method cannot price. Four limits, stated as firmly as the idea: it has never been
+run; the no-conflict state it manufactures **occurs naturally 5 times at the shipped
+budget**, and pooled over five arms it holds 32 of 350 observations while *shrinking* as
+budget grows (17/5/4/3/3 at ms 1/2/3/4/6) with accuracy rising monotonically over that
+same axis (0.353→1.000), which is a selection signature rather than an effect; so the
+projection spans **~0 to +27 pp** depending on which arm is taken as the counterfactual;
+and the 3.2 % usable tau band exists only while options are verbatim corpus text, so tau
+must be re-validated against any question set that paraphrases. Unlike the six other
+candidates closed today, this one cannot be settled by a free pre-check **because its
+mechanism is a payload state no configuration reaches on its own** — only producing it
+would tell. The 350 answer calls were not spent on a range that wide. The
 evaluation-design point still stands underneath it: an instrument whose distractors do not
 quote corpus claims would break the reach/confusion symmetry that makes presence unknowable
 from resemblance — but that, and this arm, are next-cycle material.

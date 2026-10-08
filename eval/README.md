@@ -2958,11 +2958,50 @@ from 2→4) and sell conflict-freeness (24.3 % → 8.6 %), and accuracy is the p
 52.9 % session-budget loss that motivated the ladder is real, and it is not recoverable
 by widening.
 
+**But the |M| gradient cannot be used as a counterfactual — pooled over five arms, it is
+out of support.** Purity is observable, so the tempting next rule was conflict-collapse:
+when the payload matches two or more options, drop every claim-bearing item and serve the
+uncommitted remainder. The matcher needed to decide it is not approximate but exact - a
+true match is self-similarity - so the rule is buildable: all 101 positive
+(item, option) pairs score exactly 1.0000, the best of 2 583 negatives is 0.9677, and at
+tau 0.97 the per-query option count agrees with the verbatim label on **70/70** and fires
+on exactly the 35 conflicted queries (`scripts/option_match_calib.py`). Feasibility was
+never the question. Value is, and the honest answer is that it is not measurable here:
+
+| \|M\| | n (5 arms × 70) | recorded accuracy |
+|---|---|---|
+| 0 | 32 | 0.562 [0.393, 0.718] |
+| 1 | 111 | 0.297 |
+| 2 | 103 | 0.272 |
+| 3 | 74 | 0.203 |
+| 4 | 30 | 0.267 |
+
+The direction holds across 350 observations, but the class the rule aims to *create* is
+the small one, and it does not grow with breadth - it shrinks: the number of \|M\|=0
+queries is **17 at ms=1, then 5, 4, 3, 3** at ms=2/3/4/6, because more seated sessions
+make it progressively harder for nothing in the payload to name an option. And the
+accuracy of those cells rises perfectly monotonically with the budget that produces them -
+0.353 / 0.600 / 0.750 / 1.000 / 1.000 on n = 17 / 5 / 4 / 3 / 3 - which is a selection
+signature, not a treatment: a query that reaches zero option-matches while 24 items are
+being served is easy for some reason the metric does not name. So the pooled 0.562 is a
+mixture in which 17 of 32 cases come from the narrow-budget arm where the same
+comparison reads 0.353, and **the state conflict-collapse would manufacture at ms=2
+occurs naturally five times.**
+
+The consequence for method, recorded because it is the first of the day that the free
+pre-check could not settle: for six other candidates the pre-check was decisive, and here
+it is not, because this rule's mechanism *is* a payload state that no configuration
+reaches on its own. Estimating its value requires producing it. **The arm was therefore
+not run** - the projection is anywhere from ~0 (taking ms=1's 0.353 as the
+counterfactual) to +27 pp (taking the pooled 0.562), which is not a basis for spending
+350 answer calls, and not a refutation either.
+
 ### Tuning decisions taken from measurements, not intuition
 
 
 | Decision | Evidence |
 |---|---|
+| Conflict-collapse: buildable, value not locally identifiable, **not run** (2026-10-08) | The matcher is exact (positives 1.0000, worst negative 0.9677, tau 0.97 agrees with ground truth 70/70 and fires on exactly the 35 conflicted queries), so feasibility is settled. Value is not: the no-conflict class the rule manufactures holds 32 of 350 pooled observations and *shrinks* with budget (17/5/4/3/3 at ms 1/2/3/4/6), while its accuracy rises monotonically with that budget (0.353→1.000) - a selection signature. Projection ranges ~0 to +27 pp depending on which arm is the counterfactual, and the ms=2 state occurs naturally 5 times. Six candidates were settled by free pre-checks; this one cannot be, because its mechanism is a payload state no configuration reaches on its own. |
 | Report purity alongside hit; treat conflict, not presence, as the binding quantity (2026-10-08) | Rival claims in the payload: 0 → accuracy 0.706, 1 → 0.250, 2 → 0.143, spanning 56 pp where hit spans 31. AUC vs the recorded answer: 1/purity 0.741 against hit 0.666, and purity is computable at serve time from the `options` already sent. Caveat kept attached: purity correlates with hit and the 0.706 is partly difficulty selection. |
 | Conflict suppression (drop a rival-introducing second seat): rejected before implementation (2026-10-08) | Seat readout on the one-rival class: gold owns seat 1 in 6/32, sits later in 8, absent in 18; a rival owns seat 1 in 20/32 = 62.5 %. The rule discards the only present answer more often than it keeps it, and its +2.4 pp ceiling assumes the effect it cannot establish. Cost of closing it: one build, no answer calls. **Scope note added the same day: this refutes the variant that keeps the leading seat. It does not touch conflict-collapse, which drops every claim-bearing item when two or more options are matched and trusts nothing.** The gate for that one - whether a serve-time matcher can tell which option an item carries - was measured and passed (`scripts/option_match_calib.py`): positives score exactly 1.0000, the worst of 2 583 negatives 0.9677, and at tau 0.97 the per-query option count agrees 70/70 with the verbatim label, firing on exactly the 35 conflicted queries. Untested as an arm; the band is 3.2 % wide and depends on options being verbatim, and the no-conflict class it aims to reach has n=5. |
 | Chunk granularity is not the lever; the L3 card premise is refuted twice (2026-10-08) | target 320→160→80 and max_chunk 1400→400 take memory rows from 95.6 to 135.2 per session (+42 %) while `hit` stays in 0.371-0.400 (1 question = 1.4 pp) and the extreme is worse. Cards were already measured inert (2026-09-26, `answer_session_shown` 43.8 % unchanged), and a card can never be emitted. ~650 relay calls saved. |
