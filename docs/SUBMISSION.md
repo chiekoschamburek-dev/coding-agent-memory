@@ -245,13 +245,22 @@ L3 card (refuted twice, plus never emittable). **The card spend was not incurred
 
 **What is left, stated precisely and not optimistically:** the 40 questions where the
 answer session is absent score **0.175**, below the 0.243 no-memory floor — we are worse
-than useless there, and withholding would be worth +0.039. Exploiting that needs a
-serve-time detector for "my answer is not in this payload". No score magnitude is one,
-and purity is not one either (it says how many answers are present, not whether the right
-one is). The only untried route to that detector is an instrument whose distractors do not
-quote corpus claims, because the current anchors' symmetry between reach and confusion is
-what makes presence unknowable from resemblance. That is an evaluation-design task, not a
-ranking one, and it is next-cycle material with everything else in this file.
+than useless there, and withholding would be worth +0.039. No score magnitude detects it
+(abstention AUCs 0.40-0.56), and purity does not either: it counts answers served, not
+whether the right one is among them. **What turned out detectable at serve time is
+conflict, not presence** — `scripts/option_match_calib.py` shows an item-to-option
+matcher separates perfectly, because a true match is self-similarity (all 101 positives
+exactly 1.0000; worst of 2 583 negatives 0.9677), and at tau 0.97 the per-query option
+count agrees with the verbatim label on 70/70, firing on exactly the 35 conflicted
+queries. So **conflict-collapse** — when the payload commits to two or more options, drop
+the claim-bearing items rather than trust any of them — is buildable and is the one
+untried candidate with a mechanism in its favour. Three limits, stated as firmly as the
+idea: it has never been run; the no-conflict accuracy of 0.600 that motivates it rests on
+**n=5**; and the 3.2 % usable tau band exists only while options are verbatim corpus text,
+so the threshold must be re-validated against any question set that paraphrases. The
+evaluation-design point still stands underneath it: an instrument whose distractors do not
+quote corpus claims would break the reach/confusion symmetry that makes presence unknowable
+from resemblance — but that, and this arm, are next-cycle material.
 
 ## 2b. One-shot reality
 
