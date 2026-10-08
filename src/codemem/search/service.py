@@ -167,6 +167,7 @@ class SearchPipeline:
         )
         items = self._dense_fill(user_id, plan, candidates, memories, items)
         items = self._claim_fill(user_id, plan, memories, items)
+        items = self._collapse_conflicts(items, options)
 
         log.info(
             "search done",
@@ -570,6 +571,70 @@ class SearchPipeline:
         if not self._CAUSE.search(text) or not self._CLAIM_SYMBOL.search(text):
             return False
         return not self._CLAIM_SCAFFOLD.search(text)
+
+    def _collapse_conflicts(self, items: list, options: list[str] | None) -> list:
+        """Drop claim-bearing items when the payload commits to two or more options.
+
+        Rejected by its own arm (350 calls, 2026-10-08): 0.329 -> 0.300 on the claim
+        anchor, +1/-3, p=0.625. The gate did what the calibration promised - it fired on
+        the 35 conflicted queries and nowhere else, dropping 2.03 items per fired payload
+        and touching no unfired one - and the score still fell, because the loss was
+        never a rival steering the model away from an answer that was aboard. On the 20
+        fired queries with no answer in the payload, removing every claim left them at
+        0.150 rather than at the 0.243 no-memory prior the projection assumed, a single
+        question better than the baseline and less than the unfired control moved by
+        accident. On the 15 where the answer was aboard it destroyed the answer by
+        construction: the gold option is verbatim corpus text, so its item matches it at
+        1.0 and cannot survive this rule. 0.333 -> 0.200.
+
+        Kept off and kept working, because the arm that closed the purity axis is not
+        reproducible without it, and because the conservative edge is the part of the
+        rule that was never tested: if every item carries a claim the payload stands,
+        since collapsing to nothing is abstention and abstention is unmeasured.
+        """
+        settings = self.settings
+        if not settings.conflict_collapse or not items or not options:
+            return items
+        embedder = self.retriever.embedder
+        if embedder is None or not embedder.available:
+            return items
+        try:
+            clean = [o.strip() for o in options if o and o.strip()]
+            if len(clean) < 2:
+                return items
+            vectors = embedder.embed(clean + [item.content for item in items]) or []
+            if len(vectors) != len(clean) + len(items):
+                return items
+            ovec, ivec = vectors[: len(clean)], vectors[len(clean):]
+            tau = settings.conflict_collapse_tau
+            carriers: list[tuple[int, ...]] = []
+            matched: set[int] = set()
+            for ivector in ivec:
+                hits = tuple(
+                    oi
+                    for oi, ovector in enumerate(ovec)
+                    if sum(a * b for a, b in zip(ovector, ivector)) >= tau
+                )
+                carriers.append(hits)
+                matched.update(hits)
+            if len(matched) < 2:
+                return items
+            kept = [item for item, hits in zip(items, carriers) if not hits]
+            if not kept:
+                return items
+            log.info(
+                "conflict collapse",
+                extra={"ctx": {"dropped": len(items) - len(kept), "options": len(matched)}},
+            )
+            # Kept items are a subsequence of a strictly decreasing score sequence,
+            # so the contract's "higher score means more relevant" still holds.
+            return kept
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "conflict collapse skipped",
+                extra={"ctx": {"error": str(exc)[:200]}},
+            )
+            return items
 
     def _dense_fill(
         self,

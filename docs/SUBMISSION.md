@@ -284,6 +284,39 @@ paraphrases). The wider evaluation-design point stands underneath it: an instrum
 distractors do not quote corpus claims would break the reach/confusion symmetry that makes
 presence unknowable from resemblance — but that, and this arm, are next-cycle material.
 
+**The arm was then run (350 calls, same day) and it loses: 0.329 → 0.300, +1/−3,
+p=0.625, CI [−0.086, +0.029].** The mechanism is not what failed. The gate fired exactly
+where the calibration said it would (fired payloads 9.86 → 7.83 items, the 35
+unfired queries' payloads byte-identical at 9.31, no payload ever emptied), and the score
+moved the wrong way:
+
+| partition | n | ms=2 | collapse |
+|---|---|---|---|
+| not fired — the control, pure answer-model noise | 35 | 0.457 | 0.429 (+0/−1) |
+| fired, gold claim aboard | 15 | 0.333 | 0.200 (+0/−2) |
+| fired, no answer to destroy | 20 | 0.100 | **0.150** (+1/−0) |
+
+Two things die here, and only one of them was a hypothesis. **The rescue row does not
+exist**: the 20 answer-absent queries went to 0.150, a single question, less than the
+control group drifted by accident, so their 0.100 was never an actively misleading item
+steering the model away from a 24 % baseline — it is absence, and subtracting a rival
+cannot add an answer. **The optimistic row was impossible as written**, and I wrote it
+anyway: in a fired query the gold option is verbatim corpus text, so its carrying item
+matches the gold option at self-similarity 1.0 and the rule drops it. Any rule that
+subtracts claim-bearing items from a payload that holds the answer trades two-fifths of a
+correct answer for a coin flip, and that bound was computable from the rule's definition
+before a single call was spent. Incidental and not a gain: with the claims stripped the
+answer model got *more* certain (unanimous 0.971 vs 0.929, per-pass spread
+0.300–0.300 vs 0.314–0.343) and no more accurate.
+
+`conflict_collapse` stays off, reproducible behind `--conflict-collapse`. This is the
+end of the purity axis as a serve-time *action*: conflict is the signal inside purity, it
+is detectable at 70/70, and acting on it by subtraction costs 2.9 pp. What is left of the
+0.175/0.243 gap is index-side — deciding not to build a two-option payload at all, rather
+than building one and removing from it — and the eval-design point underneath it (an
+instrument whose distractors do not quote corpus claims) is next-cycle material with
+everything else in this file.
+
 ## 2b. One-shot reality
 
 There is **no platform-feedback loop this cycle**: one Full evaluation, no

@@ -484,6 +484,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="weight for operative lines when selecting a window")
     parser.add_argument("--repeats", type=int, default=1,
                         help="answer each question N times and majority-vote")
+    parser.add_argument("--conflict-collapse", action="store_true",
+                        help="drop items that carry the text of an option when the "
+                             "payload commits to two or more options (see the purity "
+                             "section of eval/README.md); off by default")
+    parser.add_argument("--conflict-collapse-tau", type=float, default=None,
+                        help="cosine above which an item is taken to carry an option")
     parser.add_argument("--cards", action="store_true",
                         help="enable L3 experience cards (one overview per "
                              "session, scored but never emitted); spends one "
@@ -601,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["evidence_max_sessions"] = args.max_sessions
     if args.cap is not None:
         overrides["max_evidence_per_session"] = args.cap
+    if args.conflict_collapse:
+        overrides["conflict_collapse"] = True
+    if args.conflict_collapse_tau is not None:
+        overrides["conflict_collapse_tau"] = args.conflict_collapse_tau
     if args.operative_weight is not None:
         overrides["evidence_operative_weight"] = args.operative_weight
     if args.listwise_enabled is not None:

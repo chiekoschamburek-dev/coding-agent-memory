@@ -196,6 +196,21 @@ class Settings:
     claim_channel: bool = False
     claim_channel_floor: float = 0.45
     claim_channel_cap: int = 3
+    # Conflict collapse: when the returned items collectively carry the text of two
+    # or more of the sent options, drop those items and return the rest. Measured on
+    # the claim anchor as an answer-metric arm (350 calls, 2026-10-08) and rejected:
+    # 0.329 -> 0.300, +1/-3, p=0.625, with the gate firing exactly as calibrated
+    # (fired payloads 9.86 -> 7.83 items, unfired byte-identical). The predicted
+    # rescue did not happen - the 20 answer-absent fired queries went 0.100 -> 0.150,
+    # one question, less than the unfired control drifted - so their 0.100 is the
+    # answer's absence, not a rival steering the model, and subtraction cannot supply
+    # a present answer. Stays off; kept because the arm is otherwise unreproducible.
+    conflict_collapse: bool = False
+    # A true match is self-similarity because options are verbatim corpus text
+    # (positives 1.0000; worst of 2 583 negatives 0.9677), so the band is ~3 % wide
+    # and exists only while options stay verbatim. Re-validate before reusing on a
+    # question set that paraphrases.
+    conflict_collapse_tau: float = 0.97
     # Hard budget for the selection call. The relay answered in ~1 s when
     # healthy; 10 s bounds the tail so the fallback (shipped ordering) fires
     # well inside the platform's 30-minute Search ceiling while keeping
@@ -626,6 +641,8 @@ class Settings:
             _env_float("CODEMEM_CLAIM_CHANNEL_FLOOR", 0.45),
         )
         put("claim_channel_cap", _env_int("CODEMEM_CLAIM_CHANNEL_CAP", 3))
+        put("conflict_collapse", _env_bool("CODEMEM_CONFLICT_COLLAPSE", False))
+        put("conflict_collapse_tau", _env_float("CODEMEM_CONFLICT_COLLAPSE_TAU", 0.97))
         put(
             "session_select_timeout_seconds",
             _env_float("CODEMEM_SESSION_SELECT_TIMEOUT_SECONDS", 10.0),
