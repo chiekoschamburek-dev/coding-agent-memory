@@ -3065,6 +3065,16 @@ the payload level now has a measured price of −2.9 pp. What remains on the pur
 is index-side only - not serving a payload that commits to two options, rather than
 serving one and subtracting from it.
 
+**And it takes the abstention number with it, which is the more consequential loss.**
+The index-side case has always been the 40 answer-absent questions at 0.175 against the
+0.243 no-memory floor, worth +0.039 for *not serving*. This arm is the closest thing to
+that counterfactual anyone has produced locally: it removed the payload's candidate-answer
+sentences and left everything else in place, and those queries went to 0.150 - still nine
+points under the prior, and only one question off their own baseline. So the deficit on
+that class is not the claim text doing damage; it is either the residual non-claim text
+or the questions simply being hard, and neither is addressed by withholding. Withholding
+remains untested, and it no longer has a mechanism behind it.
+
 ### Tuning decisions taken from measurements, not intuition
 
 

@@ -245,7 +245,11 @@ L3 card (refuted twice, plus never emittable). **The card spend was not incurred
 
 **What is left, stated precisely and not optimistically:** the 40 questions where the
 answer session is absent score **0.175**, below the 0.243 no-memory floor — we are worse
-than useless there, and withholding would be worth +0.039. No score magnitude detects it
+than useless there, and withholding would be worth +0.039. **That +0.039 is now the
+weakest number in this file** (see the collapse arm below): a payload with every
+candidate-answer sentence removed still left its answer-absent half at 0.150, nine points
+under the prior, so the deficit is not caused by the claim text the payload carries and
+an empty payload has no measured claim to collect it. No score magnitude detects it
 (abstention AUCs 0.40-0.56), and purity does not either: it counts answers served, not
 whether the right one is among them. **What turned out detectable at serve time is
 conflict, not presence** — `scripts/option_match_calib.py` shows an item-to-option
