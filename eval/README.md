@@ -2860,11 +2860,114 @@ operative chunk measured ambiguity 0.567) and the same one behind the reach/conf
 law, now reproduced in the ordering dimension. No answer-metric arm was run, saving the
 ~350 relay calls the pre-check exists to avoid spending.
 
+### Purity, not presence: the quantity that actually decides the answer (2026-10-08)
+
+`scripts/claim_level_metric.py`, `scripts/canary_inject.py`. The four options on this
+anchor are **verbatim corpus claims**, so payload quality has a claim-level definition
+that needs no model and no string parser. All four were located for 70/70 questions (all
+3 rivals resolved every time; a claim maps to exactly 1 memory, mean 1.0), which is what
+makes the numbers below trustworthy rather than an artefact of a matching path.
+
+Definitions: `hit` = the gold claim's memory is in the payload; `purity` = 1 + how many
+*other* options' claims ride along; `decidable_claim` = hit AND purity == 1.
+
+| quantity | shipped config |
+|---|---|
+| `hit` | 38.6 % |
+| zero-rival payload | 24.3 % |
+| `decidable_claim` | 17.1 % |
+| AUC against the recorded answer | **1/purity 0.741**, hit 0.666, decidable_claim 0.664 |
+
+and read as accuracy, the rival count dominates:
+
+| rivals in payload | n | recorded accuracy |
+|---|---|---|
+| 0 | 17 | **0.706** |
+| 1 | 32 | 0.250 |
+| 2 | 21 | **0.143** |
+
+**Conflict spans 56 points; presence of the right answer spans 31.** That is the
+reach-buys-confusion law finally measured as a count instead of inferred from arm
+failures, and unlike every magnitude tried for abstention (AUC 0.40-0.56) it is
+computable **at serve time**: the platform sends `options` and `plan_query` already reads
+them, so "how many candidate answers am I about to serve" needs no label and no model.
+One caveat stated before it is used: purity correlates with hit, and the 0.706 on the
+zero-rival class is at least partly a difficulty selection - see the seat readout below,
+which is what stops it being read as a treatment effect.
+
+**Label ablation, done honestly the second time.** A first attempt compared the best
+gold memory's score to the pool maximum - zero by construction, since the maximum is
+taken over all candidates including it, and it was about to be reported as "the label is
+innocent". The non-tautological quantity is how often the pool's best chunk *is* the
+answer sentence: **15/70 = 21.4 %**, against 12.9 % for the file-overlap label's
+session head. Under a label nobody can dispute, gold is still almost never on top, so
+**"gold loses to noise" is a retrieval-and-representation finding, not an artefact of
+the overlap label**.
+
+**Canary: the pipeline is content-seeking, not provenance-aware.** Inserting the answer's
+own sentence into a session the label calls a distractor, then asking the real question
+(25 queries): the injected memory is seated **22/25 = 88 %** of the time, outranks the
+genuine recording in 16 %, and displaces it from the payload in 12 %. So it will serve
+the right sentence wherever it appears - which is also why the sentence's *location*
+inside a long trajectory is not the obstacle, as the granularity sweep below confirms.
+
+**Seat readout: the conflict rule this section inspired is wrong in the sign.** The
+natural rule was "keep the leading seat, drop a second seat that introduces a rival
+claim", since purity is serve-time observable. In the one-rival class (n=32, accuracy
+0.250): gold owns seat 1 in **6**, sits in seat 2 in **8**, and is **absent from the
+payload in 18** - while a rival owns seat 1 in **20/32 = 62.5 %**. So the rule keeps the
+only present answer 6 of 14 times and throws it away 8 of 14. Its arithmetic ceiling is
++2.4 pp (0.353 vs 0.329) and rests on crediting survivors with the 0.706, which the 18
+answer-free cases make untenable. The reason for the sign is already established twice:
+seat 1 is chosen by the four score terms, and those terms cannot rank gold above the
+winner - so trusting the leading seat inherits a judgement known to be wrong more often
+than right. Closed for the price of one build, no answer calls.
+
+**Granularity is not the lever either.** The canary suggested the answer sentence loses
+because it is diluted inside long tool dumps, so the packing parameters were swept
+(memory rows per session shown; everything else shipped):
+
+| chunking | memories/session | `hit` | zero-rival | `decidable_claim` |
+|---|---|---|---|---|
+| target 320 / max 1400 (shipped) | 95.6 | 0.386 | 0.243 | 0.171 |
+| target 160 | 113.8 | 0.386 | 0.243 | 0.171 |
+| target 80 | 117.7 | **0.400** | 0.271 | 0.186 |
+| max 400 | 135.2 (**+42 %**) | 0.371 | 0.200 | 0.143 |
+
+At n=70 one question is 1.4 pp, so `hit` does not move across a 42 % change in the
+number of retrievable units, and the most aggressive split is slightly worse. This
+independently refutes the premise of the L3 card, which was to hand ranking a compact
+unit carrying the claim: deterministic units of exactly that kind were built for free
+and did not raise `hit`. With the 2026-09-26 measurement (cards leave
+`answer_session_shown` at 43.8 %, unchanged) the card lever is now closed twice over,
+plus the hard constraint that a card can never be emitted.
+
+**The breadth ladder, completed on the answer metric** (the two arms added here, plus the
+purity instrument on the same settings):
+
+| max_sessions | `hit` | zero-rival | reach | accuracy |
+|---|---|---|---|---|
+| 1 | 20.0 % | 44.3 % | 22.9 % | 0.314 |
+| **2 (shipped)** | 38.6 % | 24.3 % | 42.9 % | **0.329** |
+| 3 | — | — | 57.1 % | 0.314 |
+| 4 | **61.4 %** | **8.6 %** | 72.9 % | **0.243** = the no-memory floor |
+| 6 | — | — | 94.3 % | 0.257 |
+
+This is why 2 wins without maximising anything: seats buy the right answer (+22.8 pp hit
+from 2→4) and sell conflict-freeness (24.3 % → 8.6 %), and accuracy is the product. The
+52.9 % session-budget loss that motivated the ladder is real, and it is not recoverable
+by widening.
+
 ### Tuning decisions taken from measurements, not intuition
 
 
 | Decision | Evidence |
 |---|---|
+| Report purity alongside hit; treat conflict, not presence, as the binding quantity (2026-10-08) | Rival claims in the payload: 0 → accuracy 0.706, 1 → 0.250, 2 → 0.143, spanning 56 pp where hit spans 31. AUC vs the recorded answer: 1/purity 0.741 against hit 0.666, and purity is computable at serve time from the `options` already sent. Caveat kept attached: purity correlates with hit and the 0.706 is partly difficulty selection. |
+| Conflict suppression (drop a rival-introducing second seat): rejected before implementation (2026-10-08) | Seat readout on the one-rival class: gold owns seat 1 in 6/32, sits later in 8, absent in 18; a rival owns seat 1 in 20/32 = 62.5 %. The rule discards the only present answer more often than it keeps it, and its +2.4 pp ceiling assumes the effect it cannot establish. Cost of closing it: one build, no answer calls. |
+| Chunk granularity is not the lever; the L3 card premise is refuted twice (2026-10-08) | target 320→160→80 and max_chunk 1400→400 take memory rows from 95.6 to 135.2 per session (+42 %) while `hit` stays in 0.371-0.400 (1 question = 1.4 pp) and the extreme is worse. Cards were already measured inert (2026-09-26, `answer_session_shown` 43.8 % unchanged), and a card can never be emitted. ~650 relay calls saved. |
+| `evidence_max_sessions` ladder closed on the answer metric; 2 is a product peak, not a maximum (2026-10-08) | ms 1/2/3/4/6 → 0.314 / **0.329** / 0.314 / 0.243 / 0.257 against reach 22.9/42.9/57.1/72.9/94.3 % and hit 20.0/38.6/–/61.4/– % with zero-rival 44.3/24.3/–/8.6/– %. ms=4 lands exactly on the no-memory floor 0.243. The budget axis is exhausted: widening buys the right answer and sells conflict-freeness in equal measure. |
+| Label is innocent: "gold loses to noise" is a retrieval finding (2026-10-07/08) | Under the undisputable claim label, the pool's top chunk is the answer sentence on 21.4 % of questions vs 12.9 % under file overlap - barely better, so the finding survives a label nobody can dispute. Recorded with the tautology that produced a fake 0/70 first. |
 | Keep `INTENT_KIND_BONUS` as shipped (2026-10-07) | The pairing says `code` is the only per-entry feature where gold beats what outranks it (+31.3 pp net) and `diff` is on the winning side (−24.2 pp), yet all five bonus arms convert nothing: 440-464 of ~1 000 dumped entries change rank while `gold_in_window` moves −0.6/+0.3 pp and `head_is_gold` +0.9 pp at best (p≥0.25). An axis that shuffles hundreds of ranks and no outcome is a wash, not a mis-pointing. See the bonus section. |
 | Keep `evidence_max_sessions=2`, justified by minimax regret (2026-10-07) | Six-arm ladder on current code: `decidable` falls monotonically with breadth (0.633 at 1 → 0.367 unlimited) and unlimited is significantly worse than shipped (+1/−8, p=0.039; ambiguity +10/−0, p=0.002). But arm ordering **inverts with prefix length** (wider wins at 1-2 k tokens), so the constant is a bet on an unpublished platform behaviour — and 2 is the unique lowest-regret choice over that uncertainty (0.034 vs 0.066 for both neighbours). On the answer metric the whole axis is flat (0.314 / 0.329 / 0.314 at ms=1/2/3) and now we know why: reach climbs 22.9 → 57.1 % while acc-on-shown falls 0.688 → 0.425, and the matched comparison shows **redistribution, not addition** — the 14 questions served early at ms=2 are the same 14 at ms=3 and lose 14.3 pp, while 13 served late gain 15.3 pp without changing position. Do not re-propose ms=1 on `decidable` grounds, and do not propose ms=3 as a reach play. See the session-budget section. |
 | Abstention on absolute evidence: closed (2026-10-07) | Every quantity that max-normalisation throws away (IDF sum, BM25 magnitude, dense cosine, cross-encoder logit) plus the structural counts sit at AUC 0.40-0.56 for predicting reach, against a ~0.64 detectability floor at n=70. Resemblance is not presence. The +0.039 arbitrage is real but index-side only. See the abstention section. |

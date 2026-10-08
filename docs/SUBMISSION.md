@@ -204,6 +204,55 @@ matched comparison is +6.3 pp. `pool_sessions` predicts correctness
 independently of reach (p=0.011, holds in both strata) and is the covariate
 to block future arms on.
 
+## 2a-quater. Purity is the binding quantity (2026-10-08, read before proposing anything)
+
+Every arm run since §2a-ter left the shipped configuration unchanged. The productive
+output was a measurement, not an arm: with the options treated as what they
+are — **verbatim corpus claims** — payload quality gets a model-free definition, and it
+dominates the definition the project has used all week.
+
+| rivals in payload | n | recorded accuracy |
+|---|---|---|
+| 0 | 17 | **0.706** |
+| 1 | 32 | 0.250 |
+| 2 | 21 | **0.143** |
+
+**How many candidate answers we serve spans 56 points; whether the right one is present
+spans 31.** AUC against the recorded answer: `1/purity` 0.741, `hit` 0.666. Purity is
+computable at serve time from the `options` the platform already sends, which makes it
+the first serve-time signal that survived after every score magnitude failed to predict
+anything (abstention AUCs 0.40-0.56). It is not yet a lever — see below — but it is the
+first quantity in this campaign that carries information about the answer rather than
+about resemblance.
+
+**The obvious rule built on it is wrong in the sign, and that is the section's other
+result.** "Keep the leading seat, drop a second seat that introduces a rival claim" was
+tested by recording which seat holds the answer. In the one-rival class gold owns seat 1
+**6/32** times, sits later **8** times, is absent entirely **18** times, and a rival owns
+seat 1 **62.5 %** of the time. The rule would discard the only present answer more often
+than it keeps it. The reason is structural and already documented twice: seat 1 is chosen
+by the four score terms, and those terms cannot rank gold above the winner. Any rule that
+trusts the ranking inherits a judgement known to be wrong more often than right — which
+is worth checking **before** building a rule of that kind in future.
+
+**Closed today, each for the cost of one local build and zero answer calls:** label
+artefact (under the undisputable claim label gold is still the pool's best chunk only
+21.4 % of the time, so the finding is real and not the label talking), provenance
+(a canary — the answer's own sentence injected into a distractor session — is served
+88 % of the time, so the pipeline is content-seeking and location is not the obstacle),
+granularity (+42 % memory count, `hit` unmoved), the conflict rule above, and the
+L3 card (refuted twice, plus never emittable). **The card spend was not incurred.**
+
+**What is left, stated precisely and not optimistically:** the 40 questions where the
+answer session is absent score **0.175**, below the 0.243 no-memory floor — we are worse
+than useless there, and withholding would be worth +0.039. Exploiting that needs a
+serve-time detector for "my answer is not in this payload". No score magnitude is one,
+and purity is not one either (it says how many answers are present, not whether the right
+one is). The only untried route to that detector is an instrument whose distractors do not
+quote corpus claims, because the current anchors' symmetry between reach and confusion is
+what makes presence unknowable from resemblance. That is an evaluation-design task, not a
+ranking one, and it is next-cycle material with everything else in this file.
+
 ## 2b. One-shot reality
 
 There is **no platform-feedback loop this cycle**: one Full evaluation, no
@@ -301,23 +350,23 @@ multiple-comparisons burden.
   spent on it, which is what the pre-check is for. The shipped path was verified
   byte-identical with the flag off (153 tests; the recorded arm reproduces to the digit),
   not assumed.
-- **Issue-language card overview** (HyDE-style: describe the problem the
-  session solves, in issue vocabulary): the justification **shifted from
-  digest quality to recall**. The claim anchor's binding constraint is
-  menu membership — the answer session reaches the top-8 for only 22/70,
-  because the retrieval channels are file/vocabulary machinery and
-  claim-topical anchors are often not file-overlap sessions — which is
-  exactly what a session-level candidate object that embeds in query
-  vocabulary attacks. The digest-quality half of the old case shrank to
-  ~3 hard queries (8 of the 11 judgment misses were relay boundary
-  jitter). **Carry the stack's warning**: the LLM judge is non-monotone in
-  shortlist composition — measure reach and answers directly, never
-  intermediate counts. Restart only after the deployment window is locked
-  and time allows.
-- **Budget × gate interaction on the procedure e2e** (`evidence_max_sessions`
-  3–4 with `dense_eligible@0.45`): never swept under the answer-accuracy
-  lens; the frozen 58-question instrument cannot resolve it without
-  breaking the freeze.
+- **~~Issue-language card overview~~ — closed 2026-10-08, refuted twice.** It had been
+  justified by "the answer session reaches the top-8 for only 22/70" — a figure that is
+  itself stale: the F1-selection re-run showed the menu is 97.1 % saturated under the
+  option-aware plans the platform actually sends, so that 22/70 was a bare-plan artefact
+  and the recall case for a card never held. Independently, the mechanism a card was
+  supposed to supply — a compact unit carrying the claim — was built for free by splitting
+  prose finer (95.6 → 135.2 memories per session, +42 %) and `hit` did not move (0.371-0.400,
+  where one question is 1.4 pp), on top of the 2026-09-26 measurement that cards leave
+  `answer_session_shown` unchanged at 43.8 %. A card also can never be emitted (invariant 1,
+  rule §8). Do not spend the ~300 Add + ~350 answer calls.
+- **~~Budget × gate interaction, `evidence_max_sessions` 3–4~~ — the budget half is done
+  2026-10-08; the gate half is not.** ms 1/2/3/4/6 priced end-to-end on the claim anchor:
+  0.314 / **0.329** / 0.314 / 0.243 / 0.257 against reach 22.9 → 94.3 %. The axis is a
+  conflict-versus-presence dial whose product peaks at the shipped 2, and ms=4 sits exactly
+  on the no-memory floor. What remains unpriced is `dense_eligible@0.45` crossed with the
+  gate, which needs the frozen 58-question procedure instrument and therefore a cycle
+  boundary.
 - **Sealed holdout usage**: the claim instrument's 35 sealed questions are
   spent only on a final confirmation of whatever ships next cycle — one
   run, pre-registered, no tuning against them. (The instrument-growth
