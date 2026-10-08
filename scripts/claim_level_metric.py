@@ -68,6 +68,10 @@ def main() -> int:
     ap.add_argument("--data", type=Path, default=Path("eval/data/benchmark.json"))
     ap.add_argument("--recorded", type=Path, default=Path("eval/results/e2eCT_ms2.json"))
     ap.add_argument("--max-sessions", type=int, default=None)
+    ap.add_argument("--target-tokens", type=int, default=None,
+                    help="override target_chunk_tokens (prose packing, shipped 320)")
+    ap.add_argument("--max-chunk-tokens", type=int, default=None,
+                    help="override max_chunk_tokens (structural split cap, shipped 1400)")
     ap.add_argument("--top-k", type=int, default=100)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -88,6 +92,10 @@ def main() -> int:
     settings = Settings(data_dir=Path(tempfile.mkdtemp()))
     if args.max_sessions is not None:
         settings.evidence_max_sessions = args.max_sessions
+    if args.target_tokens is not None:
+        settings.target_chunk_tokens = args.target_tokens
+    if args.max_chunk_tokens is not None:
+        settings.max_chunk_tokens = args.max_chunk_tokens
     container = Container(settings)
     mem_index: dict[str, list[tuple[int, str, int]]] = {}
     rows: list[dict] = []
@@ -100,6 +108,12 @@ def main() -> int:
                 messages=[Message(**m) for m in memory["messages"]],
             )
         print(f"corpus built ({len(bench['memories'])} sessions)", file=sys.stderr)
+        _users, _memories = container.store.counts()
+        print(
+            f"  memory rows: {_memories} "
+            f"({_memories / max(1, len(bench['memories'])):.1f} per session)",
+            file=sys.stderr,
+        )
 
         store, search = container.store, container.search
         for user_id in {f"bench:{q['repo']}" for q in qa}:
@@ -188,6 +202,33 @@ def main() -> int:
             hit_ids = per_option[gold_index] if gold_index < len(per_option) else set()
             others = [s for i, s in enumerate(per_option) if i != gold_index]
             present_others = sum(1 for s in others if s & payload)
+            # Which seat of the payload carries the answer, and which carries the
+            # rival. The assembler emits session by session, so a seat is a block
+            # of items from one session; the conflict rule under consideration
+            # ("drop a second seat that introduces a rival claim") can only pay if
+            # gold usually owns the leading seat.
+            seat_of: dict[str, int] = {}
+            for it in items:
+                memory = memories.get(it.memory_id)
+                sid = memory.session_id if memory is not None else None
+                if sid is None:
+                    continue
+                seat_of.setdefault(sid, len(seat_of) + 1)
+            gold_seats = sorted(
+                {
+                    seat_of[memories[mid].session_id]
+                    for mid in (hit_ids & payload)
+                    if mid in memories and memories[mid].session_id in seat_of
+                }
+            )
+            rival_seats = sorted(
+                {
+                    seat_of[memories[mid].session_id]
+                    for s in others
+                    for mid in (s & payload)
+                    if mid in memories and memories[mid].session_id in seat_of
+                }
+            )
             # Feature comparison under the CLAIM label: the best-scoring memory that
             # holds the gold claim vs the best-scoring memory in the whole pool.
             gold_cands = [final_by_id[m] for m in hit_ids if m in final_by_id]
@@ -201,6 +242,9 @@ def main() -> int:
                     "others_located": sum(1 for s in others if s),
                     "hit": bool(hit_ids & payload),
                     "purity": 1 if not present_others else 1 + present_others,
+                    "gold_seat": gold_seats[0] if gold_seats else None,
+                    "rival_seats": rival_seats,
+                    "n_seats": len(seat_of),
                     "gold_found": bool(hit_ids),
                     "best_gold_final": max((c.final for c in gold_cands), default=None),
                     "top_final": top.final if top else None,
@@ -216,7 +260,11 @@ def main() -> int:
 
     lab = [1 if r["correct"] else 0 for r in rows]
     n = len(rows)
-    print(f"\nquestions {n}, max_sessions={settings.evidence_max_sessions}")
+    print(
+        f"\nquestions {n}, max_sessions={settings.evidence_max_sessions} "
+        f"target_chunk_tokens={settings.target_chunk_tokens} "
+        f"max_chunk_tokens={settings.max_chunk_tokens}"
+    )
     lost = sum(1 for r in rows if not r["gold_found"])
     print(f"gold claim located in 0 memories: {lost} (label path failures)")
     usable = [r for r in rows if r["gold_found"]]
@@ -257,13 +305,41 @@ def main() -> int:
     print("  session's score names a task file 12.9 % of the time: under a label no")
     print("  one can dispute, the answer sentence is the pool's best chunk barely more")
     print("  often - so 'gold loses to noise' is not an artefact of the overlap label.")
+    print("\nCONFLICT RULE READOUT - who owns the leading seat:")
+    acc = lambda S: (sum(1 for r in S if r["correct"]) / len(S)) if S else float("nan")
+    for k in (2, 3):
+        S = [r for r in usable if r["purity"] == k]
+        if not S:
+            continue
+        first = sum(1 for r in S if r["gold_seat"] == 1)
+        rival_first = sum(1 for r in S if 1 in r["rival_seats"])
+        print(f"  {k - 1} rival present (n={len(S):>2}, observed acc {acc(S):.3f}): "
+              f"gold owns seat 1 in {first}/{len(S)} = {first / len(S):.1%}; "
+              f"a rival owns seat 1 in {rival_first}/{len(S)} = {rival_first / len(S):.1%}; "
+              f"gold absent from the payload in "
+              f"{sum(1 for r in S if r['gold_seat'] is None)}/{len(S)}")
+    one = [r for r in usable if r["purity"] == 2]
+    if one:
+        keep = sum(1 for r in one if r["gold_seat"] == 1) / len(one)
+        pure_acc = acc([r for r in usable if r["purity"] == 1])
+        absent_acc = acc([r for r in usable if not r["hit"]])
+        projected = keep * pure_acc + (1 - keep) * absent_acc
+        print(f"\n  Projection for 'keep seat 1, drop a conflicting seat 2' (one-rival queries only):")
+        print(f"    observed on that subset {acc(one):.3f}  ->  projected {projected:.3f}")
+        print(f"    (gold kept {keep:.1%} of the time x purity-1 accuracy {pure_acc:.3f}, else fall back to "
+              f"absent accuracy {absent_acc:.3f})")
+        print(f"    whole-set effect if it fired on all {len(one)}: "
+                f"{(acc([r for r in usable if r['purity'] != 2]) * (len(usable) - len(one)) + projected * len(one)) / len(usable):.3f} "
+                f"vs current {(acc(usable)):.3f}")
+        print("  This is a ceiling under the assumption that dropping the rival converts the")
+        print("  query to a purity-1 query; it is not a measured arm result.")
     print("\nPURITY - how many candidate answers the payload carries:")
     for k in (1, 2, 3):
         S = [r for r in usable if r["purity"] == k]
         if not S:
             continue
-        acc = sum(1 for r in S if r["correct"]) / len(S)
-        print(f"  {k - 1} rival claim(s) present: n={len(S):>2}  recorded accuracy {acc:.3f}")
+        rate = sum(1 for r in S if r["correct"]) / len(S)
+        print(f"  {k - 1} rival claim(s) present: n={len(S):>2}  recorded accuracy {rate:.3f}")
     if args.out:
         args.out.write_text(json.dumps({"rows": rows, "max_sessions": settings.evidence_max_sessions}, indent=1), encoding="utf-8")
         print(f"\nwrote {args.out}")
