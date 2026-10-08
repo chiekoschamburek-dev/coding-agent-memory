@@ -2991,17 +2991,40 @@ occurs naturally five times.**
 The consequence for method, recorded because it is the first of the day that the free
 pre-check could not settle: for six other candidates the pre-check was decisive, and here
 it is not, because this rule's mechanism *is* a payload state that no configuration
-reaches on its own. Estimating its value requires producing it. **The arm was therefore
-not run** - the projection is anywhere from ~0 (taking ms=1's 0.353 as the
-counterfactual) to +27 pp (taking the pooled 0.562), which is not a basis for spending
-350 answer calls, and not a refutation either.
+reaches on its own. Estimating its value requires producing it.
+
+**Then the restriction test bounded it properly, and the first read was too pessimistic.**
+Splitting the 35 fired queries by whether the answer would be destroyed gives:
+
+| ms=2 partition (tau 0.97) | n | current accuracy |
+|---|---|---|
+| not fired | 35 | 0.457 |
+| fired, answer among the dropped items | 15 | 0.333 |
+| **fired, answer absent anyway** | **20** | **0.100** |
+
+and the whole-set projection under named assumptions:
+
+| dropped-answer → , answer-absent → | whole set |
+|---|---|
+| very pessimistic: both end at the observed harm level 0.175 | −1.3 pp |
+| conservative: both fall back to the no-memory floor 0.243 | **+2.1 pp** |
+| moderate: answer-absent subset reaches the only comparable natural state (0.600, n=5) | +12.3 pp |
+| optimistic: and the answer-present subset is unaffected | +14.3 pp |
+
+The floor is positive for a mechanical reason, not a speculative one: those 20
+answer-absent fired queries score **0.100**, fourteen points *below* what the model
+manages with no memory at all (0.243). Removing an item that is actively steering the
+answer wrong only has to be *neutral* to pay; only the very-pessimistic row, where the
+residual payload turns out to be as harmful as the committed one, makes the rule lose.
+What is genuinely unknown is whether that residual is neutral - and that, finally, is the
+one thing only the arm can say. Not run as of this writing.
 
 ### Tuning decisions taken from measurements, not intuition
 
 
 | Decision | Evidence |
 |---|---|
-| Conflict-collapse: buildable, value not locally identifiable, **not run** (2026-10-08) | The matcher is exact (positives 1.0000, worst negative 0.9677, tau 0.97 agrees with ground truth 70/70 and fires on exactly the 35 conflicted queries), so feasibility is settled. Value is not: the no-conflict class the rule manufactures holds 32 of 350 pooled observations and *shrinks* with budget (17/5/4/3/3 at ms 1/2/3/4/6), while its accuracy rises monotonically with that budget (0.353→1.000) - a selection signature. Projection ranges ~0 to +27 pp depending on which arm is the counterfactual, and the ms=2 state occurs naturally 5 times. Six candidates were settled by free pre-checks; this one cannot be, because its mechanism is a payload state no configuration reaches on its own. |
+| Conflict-collapse: buildable, projection bounded, **not run** (2026-10-08) | The matcher is exact (positives 1.0000, worst negative 0.9677, tau 0.97 agrees with ground truth 70/70 and fires on exactly the 35 conflicted queries), so feasibility is settled. The no-conflict class it manufactures is rare and selection-contaminated (17/5/4/3/3 observations at ms 1/2/3/4/6, accuracy rising monotonically with that budget), so the pooled comparison cannot price it - but the fired set splits by whether the answer is destroyed, and then the floor is positive: the 20 answer-absent fired queries score 0.100, 14 pp below the no-memory floor, so removing the item only has to be neutral to pay (+2.1 pp conservative, +12.3 pp if the comparable natural state transfers, -1.3 pp only if the residual payload is as harmful as the committed one). Open question reduced to one: is the residual neutral. That needs the arm. |
 | Report purity alongside hit; treat conflict, not presence, as the binding quantity (2026-10-08) | Rival claims in the payload: 0 → accuracy 0.706, 1 → 0.250, 2 → 0.143, spanning 56 pp where hit spans 31. AUC vs the recorded answer: 1/purity 0.741 against hit 0.666, and purity is computable at serve time from the `options` already sent. Caveat kept attached: purity correlates with hit and the 0.706 is partly difficulty selection. |
 | Conflict suppression (drop a rival-introducing second seat): rejected before implementation (2026-10-08) | Seat readout on the one-rival class: gold owns seat 1 in 6/32, sits later in 8, absent in 18; a rival owns seat 1 in 20/32 = 62.5 %. The rule discards the only present answer more often than it keeps it, and its +2.4 pp ceiling assumes the effect it cannot establish. Cost of closing it: one build, no answer calls. **Scope note added the same day: this refutes the variant that keeps the leading seat. It does not touch conflict-collapse, which drops every claim-bearing item when two or more options are matched and trusts nothing.** The gate for that one - whether a serve-time matcher can tell which option an item carries - was measured and passed (`scripts/option_match_calib.py`): positives score exactly 1.0000, the worst of 2 583 negatives 0.9677, and at tau 0.97 the per-query option count agrees 70/70 with the verbatim label, firing on exactly the 35 conflicted queries. Untested as an arm; the band is 3.2 % wide and depends on options being verbatim, and the no-conflict class it aims to reach has n=5. |
 | Chunk granularity is not the lever; the L3 card premise is refuted twice (2026-10-08) | target 320→160→80 and max_chunk 1400→400 take memory rows from 95.6 to 135.2 per session (+42 %) while `hit` stays in 0.371-0.400 (1 question = 1.4 pp) and the extreme is worse. Cards were already measured inert (2026-09-26, `answer_session_shown` 43.8 % unchanged), and a card can never be emitted. ~650 relay calls saved. |

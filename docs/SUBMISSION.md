@@ -254,21 +254,35 @@ exactly 1.0000; worst of 2 583 negatives 0.9677), and at tau 0.97 the per-query 
 count agrees with the verbatim label on 70/70, firing on exactly the 35 conflicted
 queries. So **conflict-collapse** — when the payload commits to two or more options, drop
 the claim-bearing items rather than trust any of them — is buildable and is the one
-untried candidate with a mechanism in its favour — and the candidate whose value this
-cycle's method cannot price. Four limits, stated as firmly as the idea: it has never been
-run; the no-conflict state it manufactures **occurs naturally 5 times at the shipped
-budget**, and pooled over five arms it holds 32 of 350 observations while *shrinking* as
-budget grows (17/5/4/3/3 at ms 1/2/3/4/6) with accuracy rising monotonically over that
-same axis (0.353→1.000), which is a selection signature rather than an effect; so the
-projection spans **~0 to +27 pp** depending on which arm is taken as the counterfactual;
-and the 3.2 % usable tau band exists only while options are verbatim corpus text, so tau
-must be re-validated against any question set that paraphrases. Unlike the six other
-candidates closed today, this one cannot be settled by a free pre-check **because its
-mechanism is a payload state no configuration reaches on its own** — only producing it
-would tell. The 350 answer calls were not spent on a range that wide. The
-evaluation-design point still stands underneath it: an instrument whose distractors do not
-quote corpus claims would break the reach/confusion symmetry that makes presence unknowable
-from resemblance — but that, and this arm, are next-cycle material.
+untried candidate with a mechanism in its favour. Its value could not be read off the
+pooled comparison, and the reason is worth keeping: the no-conflict state it manufactures
+**occurs naturally 5 times at the shipped budget**, and across five arms the class
+*shrinks* as budget grows (17/5/4/3/3 at ms 1/2/3/4/6) while its accuracy rises
+monotonically over that same axis (0.353→1.000) — a selection signature, not an effect.
+Splitting the fired set instead, by whether the answer would be destroyed, does bound it:
+
+| ms=2 partition at tau 0.97 | n | accuracy |
+|---|---|---|
+| not fired | 35 | 0.457 |
+| fired, answer among the dropped items | 15 | 0.333 |
+| fired, answer absent anyway | **20** | **0.100** |
+
+| projection (answer-present → , answer-absent → ) | whole set |
+|---|---|
+| both end at the observed harm level 0.175 | −1.3 pp |
+| both fall back to the no-memory floor 0.243 | **+2.1 pp** |
+| answer-absent reaches the comparable natural state 0.600 | +12.3 pp |
+
+The floor is positive mechanically, not speculatively: those 20 queries sit at **0.100**,
+fourteen points below what the model does with no memory at all, so removing an item that
+is actively steering the answer wrong only has to be *neutral* to pay. One question
+survives all of this and cannot be answered locally: **whether the residual payload is
+neutral.** That is the arm, and it was not run — the 350 calls are a deliberate
+deferral, not an oversight, alongside the tau band's 3.2 % margin (valid only while
+options are verbatim, so it must be re-validated against any question set that
+paraphrases). The wider evaluation-design point stands underneath it: an instrument whose
+distractors do not quote corpus claims would break the reach/confusion symmetry that makes
+presence unknowable from resemblance — but that, and this arm, are next-cycle material.
 
 ## 2b. One-shot reality
 
