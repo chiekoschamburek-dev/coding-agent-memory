@@ -2139,6 +2139,32 @@ experiment explains from yet another angle — the answer model on adversarial
 MC instruments rewards a small payload that does not compete with the
 option-primed prior, not one that carries more of the corpus.
 
+### The relevant-history condition, ported to the main tree; the quota dials separated (2026-10-10)
+
+The relevant-history condition (149 of 300 sessions kept — the second scored
+setting of the official dual-condition structure, rules.md §十二) had only
+been measured in the CSIG-plus workspace. `eval/build_relevant_condition.py`
+ported; the deterministic stack re-run on the rebuilt corpus; numbers
+reproduce modulo one **dial correction**:
+
+| arm (relevant corpus, main tree) | entries | sessions | recall@10 | MRR |
+|---|---|---|---|---|
+| shipped (per-session 2 × sessions 2) | 9.4 | 1.97 | 0.5187 | 0.8258 |
+| per-session 10 × sessions 2 | 17.3 | 1.97 | 0.5187 | 0.8258 |
+| per-session 10 × sessions ~10 | 53.0 | 8.56 | **0.7803** | 0.8506 |
+
+The archived "cap 10 → 0.7742" conflated two separate dials. **The +26 pp of
+proxy recall lives entirely in the SESSIONS dial** (`evidence_max_sessions`);
+the per-session item cap contributes nothing to session recall@10 while
+sessions stay at 2 — the first 10 entry-slots are exhausted by the same two
+sessions either way. The session-recall ladder on this corpus: 0.519 → 0.780
+by widening the session count; noisy side the same lift is 0.462 → 0.691
+with the precision/e2e costs documented above. cap2 ≡ CSIG-plus's archived
+cap2 within a question (0.5187 vs 0.5119 — small corpus/flag differences).
+Still missing on this instrument: relevant-side **e2e accuracy** under a
+lifted session count — the direct test of whether the noisy-side answer cost
+of a wider payload also reproduces when every candidate is relevant.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
