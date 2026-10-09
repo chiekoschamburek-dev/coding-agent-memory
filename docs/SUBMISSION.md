@@ -386,7 +386,7 @@ multiple-comparisons burden.
 
 | # | item | status |
 |---|---|---|
-| 1 | Smoke test passed | **open** — needs the deployed endpoint; every track self-hosts since 2026-09-26. During the soak: the answer-call error rate under real network, and (if select-llm is enabled via env) the `session selection failed` warning rate |
+| 1 | Smoke test passed | **open** — needs the deployed endpoint; every track self-hosts since 2026-09-26. **Calendar: evaluation closes 2026-11-04 23:59; one Full run takes 0.5–2 days wall clock — deploy and smoke early enough to leave room for one retry.** During the soak: the answer-call error rate under real network, and (if select-llm is enabled via env) the `session selection failed` warning rate |
 | 2 | API contract correct | covered: `tests/test_contract.py` (identifier echo, durability-then-success, top_k ceiling, error envelope, auth, isolation, idempotency, concurrency) |
 | 3 | Add/Search models = `gpt-4o-mini` | the shipped graded path uses no LLM (`session_select_llm` reverted to off — §2); when enabled via env it adds one selection call per Search (`CODEMEM_LLM_MODEL`, default `gpt-4o-mini`, `max_tokens=24` — choices only, never returned text); the dense/rerank encoders are non-generative, disclosed in `docs/COMPLIANCE.md` |
 | 4 | ≥30 days publicly reachable | **open — the long pole**: VM direct port exposure per `deploy/README.md` (CDN/edge proxies cap timeouts below the worst-case Add and are recorded as unsafe) |
