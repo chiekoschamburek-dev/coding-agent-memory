@@ -366,6 +366,13 @@ def main(argv: list[str] | None = None) -> int:
                              "records an action' (0 = off, the default). Targets "
                              "the measured failure where a read of a file "
                              "outscores the edit that changed it")
+    parser.add_argument("--claim-channel", action="store_true",
+                        help="claims-only dense side-channel: append claim-"
+                             "shaped memories above an absolute floor")
+    parser.add_argument("--digest-cards", action="store_true",
+                        help="rewritten-memory cards: issue-language digests "
+                             "generated at Add time, delivered via the "
+                             "non-competing side channel")
     parser.add_argument("--position-weight", type=float, default=None,
                         help="override evidence_position_weight: intra-session "
                              "tilt of slot choice toward the end of the "
@@ -491,6 +498,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_select_llm"] = True
     if getattr(args, "intra_session_order_weight", None) is not None:
         overrides["intra_session_order_weight"] = args.intra_session_order_weight
+    if getattr(args, "claim_channel", False):
+        overrides["claim_channel"] = True
+    if getattr(args, "digest_cards", False):
+        overrides["digest_channel"] = True
 
     ks = tuple(int(k) for k in args.ks.split(",") if k.strip())
     data = load_benchmark(args.data)

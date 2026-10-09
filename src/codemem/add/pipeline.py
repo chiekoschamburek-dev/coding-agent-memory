@@ -88,7 +88,11 @@ class AddPipeline:
             self._embed(user_id, request_id, plan, t0)
 
         degraded = True
-        if self.settings.card_enabled or self.settings.llm_enabled:
+        if (
+            self.settings.card_enabled
+            or self.settings.digest_channel
+            or self.settings.llm_enabled
+        ):
             degraded = not self._enrich(user_id, session_id, plan, t0)
         return outcome, degraded
 
@@ -216,19 +220,27 @@ the transcript shows them), and the outcome. Output only the summary text."""
         prompt's content hash, so a re-Add reproduces the same row); and a
         failure here degrades Add instead of failing it.
         """
-        if not self.settings.card_enabled:
+        if not (self.settings.card_enabled or self.settings.digest_channel):
             # No card work requested; nothing was skipped, so not degraded.
             return self.settings.llm_enabled
 
         deadline = t0 + self.settings.add_deadline_seconds
         try:
+            ts_values = [m["ts"] for m in plan.messages if m.get("ts") is not None]
+            ts = min(ts_values) if ts_values else None
+            ord_value = (plan.chunks[-1]["ord"] + 1) if plan.chunks else 0
+
+            if self.settings.digest_channel:
+                # Digest-only mode: issue-language cards replace the overview
+                # card entirely — generating both would double the LLM cost
+                # and blur which representation the experiment prices.
+                self._write_digests(user_id, session_id, plan, ts, ord_value)
+                return True
+
             overview = self._session_overview(plan, deadline)
             if not overview:
                 return False
 
-            ts_values = [m["ts"] for m in plan.messages if m.get("ts") is not None]
-            ts = min(ts_values) if ts_values else None
-            ord_value = (plan.chunks[-1]["ord"] + 1) if plan.chunks else 0
             found = extract_entities(overview)
             entities = [(e.etype, e.value_norm, e.value_raw) for e in found]
 
@@ -299,6 +311,99 @@ the transcript shows them), and the outcome. Output only the summary text."""
                 (cache_key, "card", overview, utc_now_iso()),
             )
         return overview
+
+    _DIGEST_SYSTEM = (
+        "You write retrieval-ready memory cards for a code repository. Describe "
+        "problems in the vocabulary a bug report would use — symptoms, error "
+        "names, affected paths — exactly as the transcript shows them. Never "
+        "invent files, commands, or outcomes the transcript does not show."
+    )
+    _DIGEST_PROMPT = """Transcript of one engineering session:
+
+{transcript}
+
+Write up to 3 memory cards, one per line. Each line, exactly this form:
+[CARD] problem: <what was broken, in bug-report wording> | cause: <root cause if found> | fix: <what was changed, with paths> | note: <boundary or failed attempt, if any>
+
+Rules: reuse the transcript's own symptom and error vocabulary; omit any
+section the transcript does not support; each card at most 60 words; output
+only the [CARD] lines."""
+
+    def _write_digests(
+        self,
+        user_id: str,
+        session_id: str,
+        plan: AddPlan,
+        ts: int | None,
+        ord_value: int,
+    ) -> int:
+        """Issue-language digest cards for one session. Never raises."""
+        budget = self.settings.card_max_input_chars
+        turns = [f"[{m['role']}] {m['content']}" for m in plan.messages]
+        transcript = "\n\n".join(turns)
+        if len(transcript) > budget:
+            head = budget // 2
+            transcript = transcript[:head] + "\n\n[...]\n\n" + transcript[-head:]
+
+        cache_key = sha256_text(
+            self._DIGEST_PROMPT.format(transcript=transcript) + "|digest"
+        )
+        with self.store._read() as conn:  # noqa: SLF001 - same package
+            row = conn.execute(
+                "SELECT payload FROM llm_cache WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        if row is not None:
+            cards = row["payload"].splitlines()
+        else:
+            deadline = time.monotonic() + self.settings.llm_timeout_seconds + 5
+            if time.monotonic() >= deadline:
+                return 0
+            raw = self._llm_complete(
+                self._DIGEST_SYSTEM,
+                self._DIGEST_PROMPT.format(transcript=transcript),
+            )
+            if not raw:
+                return 0
+            cards = [
+                line.strip()
+                for line in raw.splitlines()
+                if line.strip().startswith("[CARD]")
+            ]
+            if not cards:
+                return 0
+            with self.store._write() as conn:  # noqa: SLF001 - same package
+                conn.execute(
+                    "INSERT OR REPLACE INTO llm_cache(cache_key, kind, payload,"
+                    " created_at) VALUES (?,?,?,?)",
+                    (cache_key, "digest", "\n".join(cards), utc_now_iso()),
+                )
+
+        written = 0
+        for card in cards:
+            card = card.removeprefix("[CARD]").strip()
+            if not card:
+                continue
+            found = extract_entities(card)
+            entities = [(e.etype, e.value_norm, e.value_raw) for e in found]
+            memory_id = self.store.add_digest(
+                user_id=user_id,
+                session_id=session_id,
+                text=card,
+                ts=ts,
+                ord=ord_value + written + 1,
+                entities=entities,
+            )
+            if memory_id is None:
+                continue
+            self._embed_card(user_id, memory_id, card)
+            written += 1
+        if written:
+            log.info(
+                "digest cards written",
+                extra={"ctx": {"user_id": user_id, "session_id": session_id,
+                               "cards": written}},
+            )
+        return written
 
     def _llm_complete(self, system: str, user: str) -> str | None:
         """One chat completion against the configured relay. Never raises."""

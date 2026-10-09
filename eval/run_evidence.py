@@ -381,6 +381,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-sessions", type=int, default=None)
     parser.add_argument("--operative-promotion", type=int, default=None,
                         help="override evidence_operative_promotion (-1=all, 0=never, N=top N)")
+    parser.add_argument("--claim-channel", action="store_true",
+                        help="claims-only dense side-channel: append claim-"
+                             "shaped memories above an absolute floor")
+    parser.add_argument("--digest-cards", action="store_true",
+                        help="rewritten-memory cards: issue-language digests "
+                             "generated at Add time, delivered via the "
+                             "non-competing side channel")
     parser.add_argument("--cards", action="store_true",
                         help="enable L3 experience cards (one overview per "
                              "session, scored but never emitted)")
@@ -463,6 +470,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["session_select_llm"] = True
     if getattr(args, "intra_session_order_weight", None) is not None:
         overrides["intra_session_order_weight"] = args.intra_session_order_weight
+    if getattr(args, "claim_channel", False):
+        overrides["claim_channel"] = True
+    if getattr(args, "digest_cards", False):
+        overrides["digest_channel"] = True
     if args.interleave:
         overrides["evidence_session_interleave"] = True
     if args.max_sessions is not None:

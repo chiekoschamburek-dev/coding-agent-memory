@@ -431,6 +431,60 @@ class Store:
             ).fetchall()
         return {int(r["memory_id"]): _unpack(r["vec"]) for r in rows}
 
+    def digest_rows(self, user_id: str) -> list[dict]:
+        """Rewritten-memory card rows (kind='digest') for one user."""
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id AS memory_id, session_id, text, created_at,"
+                " superseded_by FROM memory"
+                " WHERE user_id = ? AND kind = 'digest'",
+                (user_id,),
+            ).fetchall()
+        return [
+            {
+                "memory_id": int(r["memory_id"]),
+                "session_id": r["session_id"],
+                "text": r["text"],
+                "created_at": r["created_at"],
+                "superseded": r["superseded_by"] is not None,
+            }
+            for r in rows
+        ]
+
+    def add_digest(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        ts: int | None,
+        ord: int,
+        entities: Sequence[tuple[str, str, str]] = (),
+    ) -> int | None:
+        """Persist one rewritten-memory card (kind='digest').
+
+        Unlike other memory rows, a digest is LLM text and is returnable
+        data[].content via the claims side-channel — the deliberate relaxation
+        of the verbatim invariant (config: digest_channel). Dedupe is per
+        session on the content hash, so a re-Add reproduces the same row.
+        """
+        now = utc_now_iso()
+        with self._write() as conn:
+            return self._insert_memory(
+                conn,
+                user_id=user_id,
+                session_id=session_id,
+                request_id=f"digest:{sha256_text(text)[:16]}",
+                chunk_id=None,
+                kind="digest",
+                title="digest|",
+                text=text,
+                ts=ts,
+                ord=ord,
+                now=now,
+                entities=entities,
+            )
+
     def user_memory_count(self, user_id: str) -> int:
         """Total memory rows for one user — the claim-index staleness token."""
         with self._read() as conn:

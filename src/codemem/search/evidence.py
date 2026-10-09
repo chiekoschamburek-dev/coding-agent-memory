@@ -873,7 +873,7 @@ def assemble(
             # are all cards therefore emits nothing — a card qualifies
             # nothing — because `taken` stays 0 and `sessions_used` is not
             # incremented.
-            if memory.kind == "card":
+            if memory.kind in ("card", "digest"):
                 continue
             body_source = source_of[cand.memory_id]
             full_form = len(items) < settings.evidence_full_count

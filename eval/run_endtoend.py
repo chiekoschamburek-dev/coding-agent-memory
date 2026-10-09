@@ -19,6 +19,11 @@ Usage::
     python eval/run_endtoend.py --qa eval/data/qa.json --data eval/data/benchmark.json
     python eval/run_endtoend.py ... --conditions no_memory,with_memory
     python eval/run_endtoend.py ... --limit 20          # quick signal
+    python eval/run_endtoend.py ... --conditions with_memory,oracle_session,yoked_session
+
+Oracle conditions (eval/oracle_arms.py) impose perfect retrieval from outside so
+`accuracy | delivered` stops being endogenous; price the payload shape first with
+`python eval/oracle_arms.py` (zero answer calls).
 """
 
 from __future__ import annotations
@@ -36,6 +41,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, "src")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import oracle_arms  # noqa: E402  (eval/oracle_arms.py — oracle payload arms)
 
 # --------------------------------------------------------------- answer -----
 
@@ -197,6 +205,7 @@ def run_condition(
     top_k: int,
     progress_every: int = 10,
     repeats: int = 1,
+    oracle_mode: str | None = None,
 ) -> dict:
     """Run every question, optionally repeating each one.
 
@@ -217,6 +226,7 @@ def run_condition(
 
     with TestClient(app) as client:
         store = app.state.container.store
+        embedder = None
         if with_memory:
             for memory in memories:
                 client.post(
@@ -235,29 +245,44 @@ def run_condition(
                     f"mem_{row['id']}": row["session_id"]
                     for row in conn.execute("SELECT id, session_id FROM memory")
                 }
+            if oracle_mode:
+                # The rival arm needs the same serve-time matcher the
+                # conflict-collapse gate was calibrated with.
+                embedder = app.state.container.search.retriever.embedder
         else:
             mapping = {}
 
         for i, question in enumerate(questions, 1):
             context = ""
+            data: list[dict] = []
             n_shown = 0
             n_relevant_shown = 0
             answer_shown = False  # no memory is supplied in the baseline condition
             answer_positions: list[int] = []
+            oracle_stats: dict | None = None
             if with_memory:
                 user_id = _user_for_repo(memories, question["repo"])
-                response = client.post(
-                    "/search",
-                    json={
-                        "query": question["question"],
-                        # The platform sends options for multiple-choice questions,
-                        # so they are sent here too.
-                        "options": question["options"],
-                        "user_id": user_id,
-                        "top_k": top_k,
-                    },
-                )
-                data = response.json().get("data", [])
+                if oracle_mode:
+                    # Perfect retrieval is imposed from outside: the payload is
+                    # built from the session the label names, not from the
+                    # order the pipeline would have chosen.
+                    deep = oracle_arms.deep_search(client, question, user_id)
+                    data, oracle_stats = oracle_arms.build_payload(
+                        oracle_mode, question, deep, mapping, embedder
+                    )
+                else:
+                    response = client.post(
+                        "/search",
+                        json={
+                            "query": question["question"],
+                            # The platform sends options for multiple-choice
+                            # questions, so they are sent here too.
+                            "options": question["options"],
+                            "user_id": user_id,
+                            "top_k": top_k,
+                        },
+                    )
+                    data = response.json().get("data", [])
                 context, n_shown = format_context(data, budget_tokens)
 
                 relevant = set(question.get("relevant_sessions") or [])
@@ -317,6 +342,10 @@ def run_condition(
                     "n_relevant_shown": n_relevant_shown,
                     "answer_session_shown": answer_shown,
                     "answer_session_position": min(answer_positions) if answer_positions else None,
+                    # Payload size, so an oracle-vs-yoked difference can be read
+                    # as memory rather than as prompt length.
+                    "context_tokens": oracle_arms.context_tokens(data[:n_shown]),
+                    "oracle": oracle_stats,
                     "reply": raw[:40],
                 }
             )
@@ -328,6 +357,7 @@ def run_condition(
         sum(o["votes_correct"][i] for o in outcomes) / len(outcomes)
         for i in range(max(1, repeats))
     ]
+    token_counts = [o.get("context_tokens") or 0 for o in outcomes]
     return {
         "label": label,
         "n": len(outcomes),
@@ -338,6 +368,9 @@ def run_condition(
         "per_pass_max": max(per_pass),
         "unanimous_rate": sum(o["unanimous"] for o in outcomes) / len(outcomes),
         "unparsed_rate": sum(not o["parsed"] for o in outcomes) / len(outcomes),
+        "mean_context_tokens": (
+            sum(token_counts) / len(token_counts) if token_counts else 0.0
+        ),
         "outcomes": outcomes,
     }
 
@@ -375,9 +408,9 @@ def report(results: dict[str, dict], meta: dict) -> None:
 
     print(
         f"{'condition':<20}{'n':>5}{'majority':>10}{'per-pass range':>18}"
-        f"{'unanimous':>11}{'shown':>8}{'med pos':>9}"
+        f"{'unanimous':>11}{'shown':>8}{'med pos':>9}{'tok/q':>8}"
     )
-    print("-" * 85)
+    print("-" * 93)
     for label, result in results.items():
         spread = f"{result.get('per_pass_min', result['accuracy']):.3f}-{result.get('per_pass_max', result['accuracy']):.3f}"
         outs = result.get("outcomes") or []
@@ -392,6 +425,8 @@ def report(results: dict[str, dict], meta: dict) -> None:
             cols = f"{shown:>8.3f}{med:>9}"
         else:
             cols = f"{'-':>8}{'-':>9}"
+        tok = result.get("mean_context_tokens")
+        cols += f"{tok:>8.0f}" if tok else f"{'0':>8}"
         print(
             f"{label:<20}{result['n']:>5}{result['accuracy']:>10.3f}"
             f"{spread:>18}{result.get('unanimous_rate', 1.0):>11.3f}{cols}"
@@ -405,21 +440,26 @@ def report(results: dict[str, dict], meta: dict) -> None:
     print("  arm raises 'shown' while pushing the answer later, and accuracy follows")
     print("  the position. Read both before crediting reach.")
 
-    if "no_memory" in results and "with_memory" in results:
+    if "no_memory" in results:
         base = results["no_memory"]["accuracy"]
-        with_mem = results["with_memory"]["accuracy"]
-        delta = with_mem - base
         print()
-        print(f"  memory contribution: {delta:+.3f} "
-              f"({base:.3f} -> {with_mem:.3f})")
-        if delta > 0:
-            print("  The retrieved memory improved the answer model's accuracy.")
-        elif delta < 0:
-            print("  The retrieved memory HURT accuracy: noise displaced the")
-            print("  model's own reasoning. This is the failure mode the")
-            print("  relevant/noisy conditions in the real track test for.")
-        else:
-            print("  No measurable difference.")
+        print(f"  contribution over the no-memory prior ({base:.3f}):")
+        for label, result in results.items():
+            if label == "no_memory":
+                continue
+            delta = result["accuracy"] - base
+            reading = (
+                "memory improved accuracy"
+                if delta > 0
+                else "memory HURT accuracy — noise displaced the model's own reasoning"
+                if delta < 0
+                else "no measurable difference"
+            )
+            print(f"    {label:<24}{result['accuracy']:>7.3f}  {delta:+.3f}   {reading}")
+        if "with_memory" in results and "yoked_session" in results:
+            print()
+            print("  Read oracle_session against yoked_session, not only against")
+            print("  no_memory: a gain the yoked arm also shows is prompt size, not memory.")
 
     print()
     print("definition:")
@@ -454,7 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument(
         "--conditions", default="no_memory,with_memory",
-        help="comma-separated; no_memory isolates the model's own prior",
+        help="comma-separated; no_memory isolates the model's own prior. Oracle "
+             "arms (see eval/oracle_arms.py): oracle_session, yoked_session, "
+             "oracle_claim, yoked_claim, oracle_session_rival",
     )
     parser.add_argument(
         "--budget-tokens", type=int, default=60_000,
@@ -502,6 +544,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="two-stage session selection: one gpt-4o-mini "
                              "call picks the two sessions that record the "
                              "cause/fix from compact summaries")
+    parser.add_argument("--digest-cards", action="store_true",
+                        help="rewritten-memory cards: issue-language digests "
+                             "generated at Add time, delivered via the "
+                             "non-competing side channel")
+    parser.add_argument("--digest-cards", action="store_true",
+                        help="rewritten-memory cards: issue-language digests "
+                             "generated at Add time, delivered via the "
+                             "non-competing side channel")
     parser.add_argument("--claim-channel", action="store_true",
                         help="claims-only dense side-channel: append claim-"
                              "shaped memories retrieved by option probes "
@@ -587,6 +637,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["intra_session_order_weight"] = args.intra_session_order_weight
     if getattr(args, "claim_channel", False):
         overrides["claim_channel"] = True
+    if getattr(args, "digest_cards", False):
+        overrides["digest_channel"] = True
+    if getattr(args, "digest_cards", False):
+        overrides["digest_channel"] = True
     if getattr(args, "hyde_probe", False):
         overrides["hyde_probe"] = True
     if getattr(args, "session_select_votes", None) is not None:
@@ -634,16 +688,37 @@ def main(argv: list[str] | None = None) -> int:
     print(f"conditions    : {args.conditions}")
     print(f"retrieval cfg : {redact(overrides)}")
 
+    requested = [c.strip() for c in args.conditions.split(",") if c.strip()]
+    valid = {"no_memory", "with_memory", *oracle_arms.MODES}
+    unknown = [c for c in requested if c not in valid]
+    if unknown:
+        # A mistyped condition would otherwise fall through to the no-memory
+        # branch and report a plausible accuracy for an arm that never ran.
+        print(
+            f"error: unknown condition(s) {unknown}; valid: {sorted(valid)}",
+            file=sys.stderr,
+        )
+        return 2
+    if not requested:
+        print("error: --conditions is empty", file=sys.stderr)
+        return 2
+
     answerer = Answerer(model=model, base_url=base_url, api_key=api_key)
     results: dict[str, dict] = {}
     started = time.time()
 
-    for condition in [c.strip() for c in args.conditions.split(",") if c.strip()]:
-        with_memory = condition == "with_memory"
+    for condition in requested:
+        oracle_mode = condition if condition in oracle_arms.MODES else None
+        with_memory = condition == "with_memory" or oracle_mode is not None
         settings = Settings.from_env()
         settings.data_dir = Path(tempfile.mkdtemp())
         for key, value in overrides.items():
             setattr(settings, key, value)
+        if oracle_mode:
+            # An oracle must not inherit the two knobs that decide *whether* we
+            # deliver: session seating and the noise gate.
+            for key, value in oracle_arms.DEEP_OVERRIDES.items():
+                setattr(settings, key, value)
         print(f"\n  running condition: {condition}")
         results[condition] = run_condition(
             condition,
@@ -656,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
             top_k=args.top_k,
             progress_every=0 if args.quiet else 10,
             repeats=args.repeats,
+            oracle_mode=oracle_mode,
         )
 
     report(results, qa.get("meta", {}))

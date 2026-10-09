@@ -167,6 +167,7 @@ class SearchPipeline:
         )
         items = self._dense_fill(user_id, plan, candidates, memories, items)
         items = self._claim_fill(user_id, plan, memories, items)
+        items = self._digest_fill(user_id, plan, items)
         items = self._collapse_conflicts(items, options)
 
         log.info(
@@ -636,6 +637,109 @@ class SearchPipeline:
             )
             return items
 
+    def _digest_fill(self, user_id: str, plan: QueryPlan, items: list) -> list:
+        """Append rewritten-memory cards (kind='digest') retrieved by
+        option-probe cosine above an absolute floor.
+
+        Same non-competing entry mode as the claims channel: append after
+        assembly, displace nothing. The digests are LLM-written issue-language
+        cards generated at Add time (digest_channel), so Search stays
+        LLM-free. Never raises; off by default.
+        """
+        settings = self.settings
+        if not settings.digest_channel or not items:
+            return items
+        embedder = self.retriever.embedder
+        if embedder is None or not embedder.available or not plan.probes:
+            return items
+        try:
+            index = self._digest_index(user_id)
+            if not index:
+                return items
+
+            probe_vecs = embedder.embed(plan.probes[:4]) or []
+            if not probe_vecs:
+                return items
+
+            hits = []
+            for pvec in probe_vecs:
+                if not pvec:
+                    continue
+                for entry in index:
+                    vec = entry["vec"]
+                    if not vec or len(vec) != len(pvec):
+                        continue
+                    score = sum(a * b for a, b in zip(pvec, vec))
+                    if score >= settings.claim_channel_floor:
+                        hits.append((score, entry))
+            hits.sort(key=lambda pair: (-pair[0], pair[1]["memory_id"]))
+
+            tail = items[-1].score
+            out = list(items)
+            used_memory = {item.memory_id for item in items}
+            used_text = {item.content for item in items}
+            attached = 0
+            for score, entry in hits:
+                if attached >= settings.claim_channel_cap:
+                    break
+                if entry["memory_id"] in used_memory or entry["text"] in used_text:
+                    continue
+                nxt = tail - 1e-5
+                if nxt < 1e-6:
+                    break
+                tail = nxt
+                out.append(
+                    EvidenceItem(
+                        memory_id=entry["memory_id"],
+                        content=entry["text"],
+                        score=round(nxt, 6),
+                        created_at=entry["created_at"],
+                        tokens=count_tokens(entry["text"]),
+                        truncated=False,
+                        superseded=entry["superseded"],
+                    )
+                )
+                used_memory.add(entry["memory_id"])
+                used_text.add(entry["text"])
+                attached += 1
+            if attached:
+                log.info(
+                    "digest fill",
+                    extra={"ctx": {"user_id": user_id, "attached": attached}},
+                )
+            return out
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "digest fill skipped",
+                extra={"ctx": {"user_id": user_id, "error": str(exc)[:200]}},
+            )
+            return items
+
+    def _digest_index(self, user_id: str) -> list[dict]:
+        """Lazily built digest-card index for one user, vectors reused from
+        the dense channel. Cached with the user's memory count as the
+        staleness token."""
+        cached = getattr(self, "_digest_index_cache", None)
+        total = self.store.user_memory_count(user_id)
+        if cached and cached.get("user_id") == user_id and cached.get("total") == total:
+            return cached["index"]
+        rows = self.store.digest_rows(user_id)
+        vecs = self.store.vectors_for(user_id, [r["memory_id"] for r in rows])
+        index = [
+            {
+                "memory_id": r["memory_id"],
+                "session_id": r["session_id"],
+                "text": r["text"],
+                "created_at": r["created_at"],
+                "superseded": r["superseded"],
+                "vec": vecs.get(r["memory_id"]),
+            }
+            for r in rows
+            if r["memory_id"] in vecs
+        ]
+        self._digest_index_cache = {"user_id": user_id, "total": total, "index": index}
+        return index
+
     def _dense_fill(
         self,
         user_id: str,
@@ -698,7 +802,7 @@ class SearchPipeline:
             # input (docs/DESIGN.md, card invariant 1).
             if (
                 memory is None
-                or memory.kind == "card"
+                or memory.kind in ("card", "digest")
                 or memory.session_id in used_session
             ):
                 continue

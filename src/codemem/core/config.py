@@ -196,6 +196,17 @@ class Settings:
     claim_channel: bool = False
     claim_channel_floor: float = 0.45
     claim_channel_cap: int = 3
+    # Rewritten-memory cards: at Add time, an LLM turns each session into up
+    # to three issue-language cards (problem statement / cause-fix / boundary,
+    # in the vocabulary a bug report would use); at Search time they are
+    # retrieved by option-probe cosine and APPENDED via the side channel —
+    # zero displacement, Search itself stays LLM-free. The cards are LLM text
+    # and are returnable data[].content: this deliberately relaxes the
+    # verbatim invariant for these rows (the rules require memory evidence,
+    # not source text; Add-time content predates the question, so it cannot
+    # be answer generation). Offline pricing: gold-claim delivery 0 -> 84.3 %
+    # on the claim anchor. Off by default.
+    digest_channel: bool = False
     # Conflict collapse: when the returned items collectively carry the text of two
     # or more of the sent options, drop those items and return the rest. Measured on
     # the claim anchor as an answer-metric arm (350 calls, 2026-10-08) and rejected:
@@ -641,6 +652,7 @@ class Settings:
             _env_float("CODEMEM_CLAIM_CHANNEL_FLOOR", 0.45),
         )
         put("claim_channel_cap", _env_int("CODEMEM_CLAIM_CHANNEL_CAP", 3))
+        put("digest_channel", _env_bool("CODEMEM_DIGEST_CARDS", False))
         put("conflict_collapse", _env_bool("CODEMEM_CONFLICT_COLLAPSE", False))
         put("conflict_collapse_tau", _env_float("CODEMEM_CONFLICT_COLLAPSE_TAU", 0.97))
         put(
