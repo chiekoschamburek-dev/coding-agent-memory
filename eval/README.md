@@ -55,10 +55,17 @@ reproduces the two properties the Coding track is described as testing:
 
 ### Ground truth
 
-SWEContextBench ships **no** task-to-session relevance mapping — verified: the
-past-experience instances and the Lite instances have zero ``instance_id``
-overlap, and no mapping file exists in the repository. We therefore define
-relevance ourselves, in the most objective form the data supports:
+SWEContextBench ships **no task-to-session relevance field** — verified: the
+past-experience instances and the Lite instances have zero ``instance_id`` overlap
+as fields, and no mapping file exists in the repository. **Corrected 2026-10-08:**
+"no field" is not "no mapping". The upstream data does carry a recoverable,
+externally-checkable relevance signal — Lite task bodies cite their predecessor
+PRs as ``#NNNNN``, and all 300 past-experience sessions declare the task they
+solved in their first user message — which yields 12 hard edges over 12 of the 99
+Lite tasks. See the label-audit section near the end of this file; it contradicts
+our label on 4 of 105 claim questions. That signal covers 12 tasks and cannot carry
+a benchmark on its own, so a relevance definition is still required — we use the
+most objective form our own data supports:
 
 > A past session is relevant to a task if it touched at least one file that the
 > task's gold patch or test patch touches (normalized repository-relative paths).
@@ -2091,6 +2098,47 @@ window width stopped being a live variable after the multi-span redesign.
 Also removed in this change: `chunk_overlap_tokens` — a config field no
 code has ever read, deleted to stop it implying an effect.
 
+### Rewritten-memory digest cards: delivered at scale, did not convert (2026-10-09)
+
+The rule-check unlock (data[].content has no verbatim requirement) made
+returnable LLM-written memories legal, and the issue-language representation
+hypothesis finally testable end to end: `digest_channel` generates up to 3
+issue-language cards per session at Add time (bug-report vocabulary: problem
+/ cause / fix / boundary; gpt-4o-mini, content-hash cached; digest-only mode
+replaces the action-language overview) and delivers them via the
+non-competing side channel. Dual-anchor e2e, n=105, × 5, zero relay errors:
+
+| anchor | floor | deterministic | + digest cards | reach (det → digest) |
+|---|---|---|---|---|
+| claim-tune (70 q) | 0.243 | 0.300 | 0.314 | 0.429 → **0.571** |
+| claim-sealed (35 q) | 0.314 | 0.400 | 0.343 | 0.543 → **0.771** |
+| **pooled** | — | — | **+2/−3, −1.0 pp, p=1.0** | — |
+
+Pre-registered gate (pooled must not meaningfully drop AND one anchor gains
+≥ 2): **failed** — no anchor gained ≥ 2, pooled is one question under. Reach
+moved exactly as the retrieval design intended: the digests carried the
+issue-language content into the payload at +14 pp / +23 pp on the two
+anchors, at zero displacement and zero relay errors. The answers did not
+follow.
+
+**This is the fifth reach↔conversion instance and the cleanest kill in the
+campaign**: the content that reached the payload this time was precisely the
+issue-language representation the representation-gap hypothesis demanded —
+and the adversarial MC answer model still followed the option-primed prior.
+Combined with F1's retrieval-side reversal, the issue-language branch is now
+closed at BOTH ends on adversarial MC instruments (it neither retrieves
+reliably under options nor converts when delivered). The surviving branch
+remains the option-less regime, where HyDE's offline +7 and the claims-
+channel's 84 % delivery were both measured without option probes in play.
+
+`digest_channel` ships as a retained flag (off; compliant — Add-time content
+predates the question and cannot be answer generation; zero displacement;
+zero relay failures across 290 answer calls). Default configuration
+unchanged: the deterministic stack, whose compact payload advantage this
+experiment explains from yet another angle — the answer model on adversarial
+MC instruments rewards a small payload that does not compete with the
+option-primed prior, not one that carries more of the corpus.
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
@@ -3075,11 +3123,104 @@ that class is not the claim text doing damage; it is either the residual non-cla
 or the questions simply being hard, and neither is addressed by withholding. Withholding
 remains untested, and it no longer has a mechanism behind it.
 
+### The label audit: the upstream data carries one checkable relevance signal, and it contradicts our label on 4 of 105 claim questions (2026-10-08)
+
+Every ground truth in this file is a definition of ours — file overlap for the first
+anchor, recorded-claim embedding affinity for the claim anchor. Until now neither had an
+external check of any kind. The upstream paper says its related-task groups come from
+"real dependency and reference relationships among GitHub issues and pull requests". That
+mapping is not published as a field, but two pieces of shipped data reproduce it for a
+subset of tasks:
+
+- every Lite task names its predecessors as `#NNNNN` inside `problem_statement` or
+  `hints_text`;
+- **all 300 past-experience sessions declare the task they solved**, in the first user
+  message of the transcript (`instance_id: astropy__astropy-14995, repo: astropy/astropy,
+  base_commit: …, problem_statement: …`). This lives in the text, not in a field, and no
+  earlier section of this file used it.
+
+Joining the two by repository gives hard, externally-verifiable edges: **12 edges over 12
+of the 99 Lite tasks, zero self-references** (a session that solved the task itself is an
+answer key, not past experience. Structurally that cannot happen here — 299 of the 300
+sessions' own tasks appear in no published subset — but the audit excludes it by rule
+rather than by luck). Seven of the twelve tasks appear in the claim instrument, so **11 of
+its 105 questions are checkable**: enough for a bias check, not enough for a test.
+
+The same run extends the provenance validation: because every option is verbatim corpus
+text, its source session is located by string match, with no model involved. **105 of 105
+gold options trace to the recorded `answer_session`** — the purity section quoted 70/70;
+this now covers the sealed half too. So the bookkeeping is right, and the open question is
+narrower: is the *label* right?
+
+| stratum | tune | sealed | shipped ms=2 | det (C2) | ms=1 | ms=3 | RAG | no memory |
+|---|---|---|---|---|---|---|---|---|
+| official session **is** the gold | 0 | 1 | 1G | 1G | – | – | 1G | 1G |
+| official session is a **distractor option** | **3** | **1** | 0G / **3O** | 0G / 3O | 0G / 2O | 0G / 2O | 0G / 3O | 0G / **3O** |
+| official session not among the options | 3 | 3 | 2G | 1G | 1G | 1G | 0G | 0G |
+| not checkable (no cited predecessor) | 64 | 30 | 21G | 20G | 21G | 21G | 14G | 17G |
+
+**The finding is not the accuracy gap, it is arm invariance.** Three tune-set questions in
+the conflicted stratum choose the *same option in all six arms measured* — shipped ms=2,
+the independent C2 deterministic run, ms=1, ms=3, RAG, and **no memory at all**:
+
+```
+astropy__astropy-15082     official option A     every arm picks A   (our label calls A wrong)
+mwaskom__seaborn-3203      official option A     every arm picks A   (our label calls A wrong)
+scikit-learn__…-12622::2   official option D     every arm picks B   (neither gold nor official)
+```
+
+A question whose answer is identical with and without any payload **cannot be moved by a
+retrieval arm** — this is the strongest local evidence available about the label, and it is
+a mechanism argument, not a statistical one. On the first two, our scorer is measuring the
+label's disagreement with the dataset's own reference structure, and no memory system —
+including the oracle arm — can score there.
+
+Magnitudes, stated without inflation:
+
+- Flipping the 3 conflicted tune questions to the official reading moves the shipped arm
+  **0.329 → 0.371 (+4.3 pp)** — bigger than most arms measured this cycle, and it is a
+  metric correction, not a system improvement.
+- It does **not** overturn the campaign's headline. Dropping the same 3 questions moves the
+  shipped-vs-floor gap from **+0.086 to +0.090**, and in the stratum where the official
+  session is not among the options at all — where this particular bias cannot operate —
+  memory still separates the arms (shipped 2/3 vs floor 0/3 on tune).
+- Significance is unavailable: n = 11, and P(3/3 wrong | base rate 0.329) = 0.30. Any
+  reader who wants a p-value here should treat the invariance as the evidence.
+- The hypothesis that would matter most — that the adversarial lead ("some distractor must
+  be closer to the issue than the gold") systematically recruits the officially-related
+  session as a distractor, since a predecessor PR is usually the topically nearest thing in
+  the corpus — is **not supported** by what is observable: the official session appears
+  among the four options 5 times and is the gold once, against a 1-in-4 chance expectation.
+  Settling it needs a larger edge set, i.e. GitHub cross-references beyond those cited in
+  the body text.
+
+Decisions taken from this measurement:
+
+1. **Do not drop the checkable questions.** Dropping changes n and the paired-McNemar
+   baseline for every arm already recorded against it. The strata are persisted in
+   `eval/results/label_audit.json`, and any future arm on this instrument reports the
+   A/B/C split alongside the aggregate.
+2. **The oracle arm is read with 3 known-unwinnable questions on the tune set** (≈4.3 pp of
+   its ceiling). An oracle landing near 0.35–0.37 is therefore already near the visible
+   ceiling on this instrument; it must not be read as "retrieval still has room", nor as
+   "the model cannot use memory".
+3. The claim at the top of this file ("ships no task-to-session relevance mapping") has
+   been corrected in place — "no field" was true, "no mapping" was not, and the difference
+   is now measured rather than assumed.
+
+```bash
+PYTHONPATH=src python scripts/label_audit.py --out eval/results/label_audit.json
+```
+
+Zero model calls, zero relay calls: string provenance over `benchmark.json` joined to
+already-recorded per-question arm outcomes.
+
 ### Tuning decisions taken from measurements, not intuition
 
 
 | Decision | Evidence |
 |---|---|
+| Report the label-audit strata with every claim-anchor arm; do **not** drop the checkable questions (2026-10-08) | 12 externally-verifiable relevance edges recovered by joining Lite bodies' `#PR` citations to the 300 sessions' self-reported `instance_id`; 11 of 105 questions checkable, 105/105 gold options trace to `answer_session`. Three tune questions pick the **same option in all six arms including no memory**, so no retrieval arm — oracle included — can score there; flipping them would read shipped 0.329→0.371 (+4.3 pp) while the shipped-vs-floor gap is unchanged (+0.086 → +0.090 after dropping them), so the headline survives. n=11 gives P(3/3 wrong \| 0.329) = 0.30: the evidence is arm invariance, not significance. `scripts/label_audit.py`, zero relay calls. See the label-audit section. |
 | Conflict-collapse: **run and rejected, -2.9 pp** (2026-10-08) | 350 calls against the recorded ms=2 baseline. The gate behaved as calibrated (fired payloads 9.86→7.83 items, not-fired control 9.31→9.31 exactly, no payload emptied), and the score moved the wrong way: whole set 0.329→0.300 (+1/−3, p=0.625). The predicted rescue did not happen - the 20 answer-absent fired queries went 0.100→0.150, one question, less than the control group moved by accident - so 0.100 is absence, not confusion, and deleting a rival cannot supply an answer. The 15 gold-aboard fired queries went 0.333→0.200, and that class was never going to be spared: the gold option is verbatim, its item matches it at 1.0, so the rule deletes the answer by construction. The pre-registered optimistic row was therefore impossible as written, and only the two lower rows were live. Flag stays off; see the purity section. |
 | Conflict-collapse: buildable, projection bounded, **not run** (2026-10-08) — **superseded the same day by the arm above** | The matcher is exact (positives 1.0000, worst negative 0.9677, tau 0.97 agrees with ground truth 70/70 and fires on exactly the 35 conflicted queries), so feasibility is settled. The no-conflict class it manufactures is rare and selection-contaminated (17/5/4/3/3 observations at ms 1/2/3/4/6, accuracy rising monotonically with that budget), so the pooled comparison cannot price it - but the fired set splits by whether the answer is destroyed, and then the floor is positive: the 20 answer-absent fired queries score 0.100, 14 pp below the no-memory floor, so removing the item only has to be neutral to pay (+2.1 pp conservative, +12.3 pp if the comparable natural state transfers, -1.3 pp only if the residual payload is as harmful as the committed one). Open question reduced to one: is the residual neutral. That needs the arm. **Answer: no, and the question was the wrong one - the residual is not harmful either, it is simply empty of the answer, which is what the +2.1 pp row silently assumed it would not be.** |
 | Report purity alongside hit; treat conflict, not presence, as the binding quantity (2026-10-08) | Rival claims in the payload: 0 → accuracy 0.706, 1 → 0.250, 2 → 0.143, spanning 56 pp where hit spans 31. AUC vs the recorded answer: 1/purity 0.741 against hit 0.666, and purity is computable at serve time from the `options` already sent. Caveat kept attached: purity correlates with hit and the 0.706 is partly difficulty selection. |

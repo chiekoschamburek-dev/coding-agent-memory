@@ -548,10 +548,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="rewritten-memory cards: issue-language digests "
                              "generated at Add time, delivered via the "
                              "non-competing side channel")
-    parser.add_argument("--digest-cards", action="store_true",
-                        help="rewritten-memory cards: issue-language digests "
-                             "generated at Add time, delivered via the "
-                             "non-competing side channel")
     parser.add_argument("--claim-channel", action="store_true",
                         help="claims-only dense side-channel: append claim-"
                              "shaped memories retrieved by option probes "
