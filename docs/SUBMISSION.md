@@ -321,6 +321,42 @@ than building one and removing from it — and the eval-design point underneath 
 instrument whose distractors do not quote corpus claims) is next-cycle material with
 everything else in this file.
 
+## 2a-ter. The code track grades two history conditions — the frozen config must hold on both
+
+The official structure: **150 tasks run under BOTH relevant-history and
+noisy-history settings (300 scored units), reported separately** (rules.md
+§十二). The frozen configuration is therefore judged twice — once against a
+corpus where most sessions are distractors, once against one where most are
+relevant. The deterministic stack is measured on both (relevant corpus
+rebuild: 149 sessions, `eval/build_relevant_condition.py` in the CSIG-plus
+workspace):
+
+| condition | proxy recall@10 (cap 2 / cap 10) | e2e (58 q) | floor |
+|---|---|---|---|
+| noisy (300 sessions) | 0.4621 / 0.6908 | **0.362** | 0.328 |
+| relevant (149 sessions) | 0.5119 / **0.7742** | **0.362** | 0.345 |
+
+Two facts the submission rests on:
+
+1. **The frozen config does not fall below floor on either condition**, and
+   the fresh arm grid suggests a *smaller, purer* payload (1 session × short
+   items) is at-or-above shipped on BOTH corpora (+2~3 pp, within noise) —
+   the one configuration family measured to move the same direction on both
+   sides of the dial.
+2. **The obvious "just raise the quota for relevant" is a trap**: it buys
+   +26 pp proxy recall on the relevant corpus, but the reach↔conversion dial
+   reproduces on a corpus with NO distractors at all (ambiguous climbs
+   exactly where the budget moves) — "the noise law does not depend on
+   noise" (docs/EXPERIENCE-FINDINGS.md §9, EXPERIMENT.md). Confusion tracks
+   the number of candidate answers presented, not the fraction that is
+   irrelevant — which is why the compact payload is the both-conditions
+   choice, not a noisy-regime compromise.
+
+Open item, parked with CSIG-plus: the quota × item-budget grid on the
+relevant corpus is within instrument noise so far; its completion is next-
+cycle material unless the smoke window reveals which condition dominates
+the graded mix.
+
 ## 2b. One-shot reality
 
 There is **no platform-feedback loop this cycle**: one Full evaluation, no
