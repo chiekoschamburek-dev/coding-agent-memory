@@ -1,5 +1,8 @@
 # Agent Memory Challenge 2026 — 比赛规则
 ## 该文件是比赛规则文件，禁止删除！
+
+> **本项目参加：代码赛道。** 本文件保留官方条款全文（含其他赛道与多模态相关
+> 条款，它们仍是规则的一部分）；运行时技术约束见文末第十二节。
 > 来源：[agentmemoryleaderboard.ai/rules](https://agentmemoryleaderboard.ai/rules)
 > Agent Memory Challenge 是 Agent Memory Leaderboard 的首期公开评测活动，面向全球研究者、开源项目维护者和商业产品团队开放。参赛系统负责 **Add 与 Search**，平台统一完成 **Answer、Eval、结果复核与公榜发布**。
 
