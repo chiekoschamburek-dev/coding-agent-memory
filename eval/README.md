@@ -2165,6 +2165,32 @@ Still missing on this instrument: relevant-side **e2e accuracy** under a
 lifted session count — the direct test of whether the noisy-side answer cost
 of a wider payload also reproduces when every candidate is relevant.
 
+### The quota contradiction, adjudicated: relevant-side lift does not convert either (2026-10-10)
+
+The direct test the quota matrix called for: on the relevant-history corpus
+(149 sessions, no distractors), lift `evidence_max_sessions` 2 → 10 and run
+the answer model (procedure 58 q × 5, paired vs the archived relevant-side
+shipped run):
+
+| arm | accuracy | floor | reach (answer session in payload) | payload tokens |
+|---|---|---|---|---|
+| shipped (sessions 2) | 0.362 | 0.345 | 37.9 % | 2 359 |
+| **sessions 10** | **0.362** | — | **94.8 %** | 5 576 |
+
+**+4/−4, delta +0.000, p=1.0.** Reach nearly triples (37.9 % → 94.8 % — on
+the relevant corpus almost every payload now contains the answer session),
+payload doubles (2.4 k → 5.6 k tokens), and the answer accuracy does not
+move by a single question. The quota contradiction is therefore
+**dissolved, not confirmed**: the noisy-side cost of a wider payload is
+measured (precision collapse, e2e losses), and the relevant-side benefit of
+a wider payload is measured as **zero at the answer layer** — the answer
+model already extracts what it needs from the top-2 sessions when they are
+right, and extra relevant sessions add reading burden, not information.
+Cap 2 stands unconditionally; the session-count dial is closed on both
+conditions. (Run note: an earlier lift run on the claim-question set is
+not pairable — different question file; its numbers are consistent with
+this null.)
+
 ### Assembly: sessions rank, chunks are evidence
 
 `assemble` used to walk the globally sorted chunk list and count how many items
