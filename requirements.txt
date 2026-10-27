@@ -1,0 +1,12 @@
+# Runtime dependencies, pinned to the versions this system was built and
+# tested against. plan.md section 7.3 requires a fixed, verifiable version set;
+# an unpinned image would make the submitted version unreproducible.
+fastapi==0.115.14
+uvicorn==0.52.4
+pydantic==2.13.5
+openai==2.54.0
+tiktoken==0.14.0
+httpx==0.28.1
+
+# Test-only dependencies are listed separately in requirements-dev.txt so the
+# runtime image stays minimal.
