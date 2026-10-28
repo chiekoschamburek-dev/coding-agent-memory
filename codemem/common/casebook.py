@@ -830,8 +830,6 @@ def build_packet(
     (``experience._new_card_from_raw`` forces patch/verify to None), so the
     fallback cannot let a model-written diff bypass grounding.
     """
-    if _card_attr(card, "extraction_version", "") == "card-v5":
-        raise ValueError("card-v5 is an attempt, not a legacy repair packet; use render_experience")
     problem = _clean(str(_card_attr(card, "problem", "") or ""))
     problem = problem[:MAX_FIELD_CHARS]
     implement = _clean(str(_card_attr(card, "implement", "") or ""))

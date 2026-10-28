@@ -252,7 +252,7 @@ class Settings:
     # larger sessions are extracted in batches, bounded by the per-finalisation
     # model-call budget.
     experience_session_max_chunks: int = field(default_factory=lambda: _env_int("CODEMEM_EXPERIENCE_SESSION_MAX_CHUNKS", 600))
-    # v5 attempt cards are opt-in; use a separate DB/library for A/B evaluation.
+    # Card extraction version recorded on every card payload.
     experience_extraction_version: str = field(
         default_factory=lambda: _env_str("CODEMEM_EXPERIENCE_EXTRACTION_VERSION", "card-v4")
     )
@@ -264,11 +264,6 @@ class Settings:
     # Hard cap on LLM calls per session finalisation (extraction batches +
     # retries).
     extract_calls_per_finalization: int = field(default_factory=lambda: _env_int("CODEMEM_EXTRACT_CALLS_PER_FINALIZATION", 5))
-    # v5 only: independent extraction samples per batch whose admitted cards
-    # are merged (deduplicated) into the session's card set. Sampling variance
-    # is the dominant single-sample yield loss; the union recovers recall
-    # without touching the admission gate.
-    experience_v5_sample_calls: int = field(default_factory=lambda: _env_int("CODEMEM_V5_SAMPLE_CALLS", 2))
 
     # Self-contained packets are budgeted per item; these are hard ceilings that
     # the renderer enforces (see casebook.py).

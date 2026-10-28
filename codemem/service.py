@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from .common.chunking import build_chunks
-from .add.attempt import is_v5, render_attempt
 from .common.config import Settings, get_settings
 from .common.embeddings import get_embedder, get_model_limiter, pack_vector
 from .search.applicability import ListwiseApplicabilityJudge
@@ -35,7 +34,6 @@ from .add.experience import (
     extraction_system_prompt,
     build_cards,
     build_extraction_prompt,
-    card_admission_problems,
     card_anchors,
     card_entities,
     card_field_terms,
@@ -91,7 +89,7 @@ def _clamp_files_to_final_diff(card, final_files: frozenset):
     and the injected scope prior.  When the card shares no file with the
     final diff at all, keep the original (parse failure must not gut a card).
     """
-    if card.is_attempt or not final_files or not card.files:
+    if not final_files or not card.files:
         return card
     clamped = tuple(f for f in card.files if f.rsplit("/", 1)[-1] in final_files)
     if not clamped or clamped == card.files:
@@ -492,11 +490,6 @@ class MemoryService:
 
         started = _time.monotonic()
         step: dict = {"name": "finalize", "session": session_id}
-        version = self.settings.experience_extraction_version
-        existing = self.store.session_extraction_versions(user_id, session_id)
-        if existing - {version} and (is_v5(version) or any(is_v5(v) for v in existing)):
-            return {**step, "duration_ms": 0, "skipped": True,
-                    "reason": "extraction_version_conflict"}
         llm = self._llm or get_llm(self.settings)
         if not getattr(llm, "configured", False):
             return {**step, "duration_ms": 0, "skipped": True,
@@ -597,7 +590,7 @@ class MemoryService:
             card_index += 1
             return experience_id
 
-        def call_model(batch, card_hint: int | None, repair_notes: list[str] | None = None):
+        def call_model(batch, card_hint: int | None):
             """One extraction call: (parsed, result, failure_reason)."""
             remaining = deadline - _time.monotonic()
             if remaining <= 0.5:
@@ -615,18 +608,6 @@ class MemoryService:
                     user += (
                         f"\n注意：本次最多输出 {card_hint} 张 card，"
                         "优先保证 JSON 完整；放不下的内容留空，不要续写。"
-                    )
-                if repair_notes:
-                    user += (
-                        "\n你上一轮输出的全部 card 均未通过程序化准入校验，具体问题：\n"
-                        + "\n".join(f"- {note}" for note in repair_notes)
-                        + "\n请在同一输入上修正后重新输出完整 JSON："
-                        "state 证据取自动作之前的行（issue 描述通常在最前面），"
-                        "result 证据取动作之后含实际输出的行，"
-                        "行范围不超过 800 字符，不要引用空行或纯标记行。"
-                        "宁可少出或不出卡，不要为了通过校验改出更简单或更外围的卡："
-                        "clone/checkout、搭建环境、todo/进度记录类动作仍不合格，"
-                        "卡必须针对问题本身的检查或修改。"
                     )
                 parsed, result = llm.complete_json(
                     system=extraction_system_prompt(self.settings.experience_extraction_version),
@@ -664,16 +645,13 @@ class MemoryService:
                 cut = getattr(result, "raw_finish_reason", None) == "length"
                 if cut:
                     truncations += 1
-            if isinstance(raw, dict) and not is_v5(self.settings.experience_extraction_version):
+            if isinstance(raw, dict):
                 extraction_ok = True
             if failure:
                 reason = failure
                 continue
             if not isinstance(raw, dict):
                 reason = "truncated" if cut else "parse_error"
-                continue
-            if cut and is_v5(self.settings.experience_extraction_version):
-                reason = "truncated"
                 continue
             batch_by_id = {chunk.chunk_id: chunk for chunk in batch}
             max_cards = self.settings.experience_max_cards_per_session
@@ -688,89 +666,8 @@ class MemoryService:
                 created_at=now_iso(),
                 max_cards=max_cards,
             )
-            if is_v5(self.settings.experience_extraction_version):
-                proposed = raw.get("cards")
-                if isinstance(proposed, list):
-                    rejected_cards += max(0, len(proposed) - len(new_cards))
-                # Union sampling: per-attempt success is moderate and the
-                # failures are independent dice rolls, so K independent
-                # samples over the same window recover recall. The admission
-                # gate is untouched — only cards that pass get merged — and
-                # the per-session card cap bounds the union.
-                saw_empty_verdict = isinstance(proposed, list) and not proposed
-                saw_proposals = isinstance(proposed, list) and bool(proposed)
-                for _ in range(max(0, self.settings.experience_v5_sample_calls - 1)):
-                    if (not call_budget.take()
-                            or deadline - _time.monotonic() <= 1.0):
-                        break
-                    calls += 1
-                    raw_s, result_s, failure_s = call_model(batch, None)
-                    cut_s = getattr(result_s, "raw_finish_reason", None) == "length"
-                    if cut_s:
-                        truncations += 1
-                    if failure_s or not isinstance(raw_s, dict) or cut_s:
-                        continue
-                    proposed_s = raw_s.get("cards")
-                    cards_s = build_cards(
-                        raw=raw_s,
-                        chunks_by_id=batch_by_id,
-                        grounding_chunks_by_id={chunk.chunk_id: chunk for chunk in keep},
-                        user_id=user_id,
-                        session_id=session_id,
-                        id_for=id_for,
-                        extraction_version=self.settings.experience_extraction_version,
-                        created_at=now_iso(),
-                        max_cards=max_cards,
-                    )
-                    if isinstance(proposed_s, list):
-                        rejected_cards += max(0, len(proposed_s) - len(cards_s))
-                        saw_proposals = saw_proposals or bool(proposed_s)
-                        saw_empty_verdict = saw_empty_verdict or not proposed_s
-                    new_cards = (new_cards + cards_s)[:max_cards]
-                # Feedback repair: when proposals exist but none survived
-                # admission, show the labeled rejection reasons over the same
-                # window (line numbers stay valid) and let the model
-                # re-select. At most two rounds, inside the call budget.
-                repair_rounds = 0
-                while (saw_proposals and not new_cards
-                       and repair_rounds < 2
-                       and deadline - _time.monotonic() > 1.0
-                       and call_budget.take()):
-                    repair_rounds += 1
-                    calls += 1
-                    repairs += 1
-                    problems = card_admission_problems(
-                        proposed or [], chunks_by_id=batch_by_id,
-                        user_id=user_id, session_id=session_id)
-                    raw, result, failure = call_model(batch, None, repair_notes=problems)
-                    if not isinstance(raw, dict):
-                        continue
-                    proposed = raw.get("cards")
-                    cards_r = build_cards(
-                        raw=raw,
-                        chunks_by_id=batch_by_id,
-                        grounding_chunks_by_id={chunk.chunk_id: chunk for chunk in keep},
-                        user_id=user_id,
-                        session_id=session_id,
-                        id_for=id_for,
-                        extraction_version=self.settings.experience_extraction_version,
-                        created_at=now_iso(),
-                        max_cards=max_cards,
-                    )
-                    if isinstance(proposed, list):
-                        rejected_cards += max(0, len(proposed) - len(cards_r))
-                        saw_proposals = saw_proposals or bool(proposed)
-                        saw_empty_verdict = saw_empty_verdict or not proposed
-                    new_cards = (new_cards + cards_r)[:max_cards]
-                if new_cards or (not saw_proposals and saw_empty_verdict):
-                    extraction_ok = True
-                else:
-                    # Malformed/ungrounded nonempty output is not a genuine
-                    # "no experience" verdict; preserve existing cards.
-                    reason = "attempt_admission_failed"
             for card in new_cards:
-                key = ((card.state, card.action, card.result) if card.is_attempt
-                       else (card.problem or "", tuple(card.files)))
+                key = (card.problem or "", tuple(card.files))
                 if key in seen:
                     continue
                 seen.add(key)
@@ -812,15 +709,10 @@ class MemoryService:
             try:
                 card = enrich_card(card, enrich_pool)
                 card = _clamp_files_to_final_diff(card, final_files)
-                # Persist complete v5 content even if a later query has a
-                # smaller per-item budget. Retrieval may omit, never amputate.
-                if card.is_attempt:
-                    full_content = render_attempt(card, self.counter, None)
-                else:
-                    full_content = render_experience(
-                        card, render_chunks, self.counter, default_cap,
-                        self.settings.experience_quote_max_chars,
-                    )
+                full_content = render_experience(
+                    card, render_chunks, self.counter, default_cap,
+                    self.settings.experience_quote_max_chars,
+                )
                 if not full_content.strip():
                     continue
                 self.store.insert_experience(

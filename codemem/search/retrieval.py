@@ -88,8 +88,6 @@ def _first_action_hint(card: ExperienceCard, features: QueryFeatures) -> str:
     (A)-axis semantics source and the (B)-axis guardrail when the fix scope
     expands.  No evaluator-side data is named.
     """
-    if card.is_attempt:
-        return ""
     files = [str(f).strip() for f in (getattr(card, "files", ()) or ()) if str(f).strip()]
     if not files:
         return ""
@@ -340,12 +338,7 @@ class SearchEngine:
 
         for rank, candidate in enumerate(selected, start=1):
             card = (candidate.payload or {}).get("card")
-            is_attempt = bool(card and card.is_attempt)
-            verdict = (candidate.payload or {}).get("applicability") or {}
-            if is_attempt and isinstance(verdict, dict) and verdict.get("app") == "no":
-                diagnostics.dropped_low_score += 1
-                continue
-            if (is_attempt or emitted >= min_items) and candidate.fused_score < floor:
+            if emitted >= min_items and candidate.fused_score < floor:
                 diagnostics.dropped_low_score += 1
                 continue
             remaining = hard_cap - accumulated_tokens
@@ -369,7 +362,7 @@ class SearchEngine:
             allow_patch = _patch_allowed(candidate, features)
             if not allow_patch:
                 diagnostics.patch_suppressed += 1
-            evidence = () if is_attempt else self._card_evidence(
+            evidence = self._card_evidence(
                 candidate.payload["card"], features,
                 k=self.settings.card_evidence_items,
             )
@@ -561,10 +554,6 @@ class SearchEngine:
             try:
                 card = card_from_payload(json.loads(row["payload"]))
             except Exception:
-                continue
-            if card.is_attempt and (not card.has_narrative_fields or not ranks.get(eid)):
-                # Legacy recall enumerates recent cards as a fallback. A v5
-                # attempt must earn a state-based channel hit, not a slot.
                 continue
             cards[eid] = (card, row)
             ref_ids.update(card.source_chunk_ids)
@@ -879,10 +868,6 @@ class SearchEngine:
                 continue
             payload = candidate.payload or {}
             card = payload.get("card")
-            if card is not None and card.is_attempt:
-                # Do not reinterpret an attempt as a final successful repair
-                # or run the legacy repair judge on empty legacy fields.
-                continue
             packet = payload.get("packet")
             if packet is None:
                 card = payload.get("card")

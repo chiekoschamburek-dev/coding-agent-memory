@@ -18,8 +18,7 @@ codemem/
 ├── common/     shared infrastructure: config, store (SQLite), chunking, embeddings,
 │               llm client, request guard, token counting, casebook (deterministic packets)
 ├── add/        the Add algorithm: chunking-driven ingestion and card extraction
-│   ├── attempt.py       card-v5 extractor (state/action/mechanism/result + evidence admission)
-│   └── experience.py    versioned card model (card-v4/v5), admission, payload, index face
+│   └── experience.py    versioned card model, admission, payload, index face
 ├── search/     the Search algorithm
 │   ├── query.py         query feature extraction (entities, anchors, term groups)
 │   ├── retrieval.py     4-channel recall + RRF fusion + deterministic floor
@@ -41,40 +40,24 @@ codemem/
 | Meta | yes | cross-session aggregated rules; cites ≥2 cards from ≥2 different sessions; no paths/patches |
 | Chunk lexical index / chunk vectors | **no** | chunks are facts, not retrieval items |
 
-## Add: card-v5, an evidence-bound attempt
+## Add: evidence-grounded cards
 
-The default extractor remains **card-v4**. `card-v5` adds a separate semantic format:
-**state / action / mechanism / result**. One card is one meaningful attempt, including failed or
-reverted attempts, not a retrospective combination of every edit and the session's final
-successful test run.
+Each closed session is distilled by `gpt-4o-mini` into at most three experience cards
+(`card-v4`): a `problem / locate / implement` repair case plus grounded structure
+(`files / symbols / conditions / pitfalls`) and a deterministic `patch / verify` packet.
 
-- `state`: symptoms, inputs, configuration and code facts known before acting.
-- `action`: the actual investigation or change, not an instruction for the new task.
-- `mechanism`: the historical explanation/hypothesis; nullable when unsupported.
-- `result`: exact historical observation quotes, including failures, incomplete validation and
-  explicitly recorded untested scope.
+- `problem` is the retrieval face: symptoms and trigger conditions written in the issue's
+  own vocabulary, before any fix is known.
+- `implement` carries the acceptance-tested requirement shape of this class of fix
+  (`implement_shape / boundaries / acceptance`), not the historical change narrative.
+- `conditions` are facts (versions, modules, error literals), never an applicability verdict;
+  `patch` and `verify` are derived deterministically from the cited evidence, never accepted
+  from model output.
 
-Per-field `evidence` entries (`field`, `chunk_id`, `quote`) are stored as audit metadata. The
-extractor cites evidence by **continuous line numbers** over the `L`-labelled prompt lines —
-gpt-4o-mini cannot transcribe quotes reliably, so admission resolves the cited address to the
-exact stored span and the model never transcribes — it only selects lines. Admission checks
-exact, unambiguous quotations, user/session scope, field-specific code anchors and
-state/action/result chronology. The model's `result` summary is **not trusted**: the stored
-result is reconstructed from the result evidence in source order.
-
-All v5 index channels are state-based: lexical terms and vectors use the state face; auxiliary
-entities/anchors come only from state and its cited quotes. Actions, mechanisms, results and
-whole-session evidence are excluded from v5 recall.
-
-Per batch, the extractor draws several independent samples (`CODEMEM_V5_SAMPLE_CALLS`, default 2)
-whose admitted cards are deduplicated into a union; when the union is empty while proposals
-exist, up to two feedback repair calls re-run extraction with the labeled rejection reasons.
-Enable with:
-
-```powershell
-$env:CODEMEM_EXPERIENCE_EXTRACTION_VERSION = "card-v5"
-$env:CODEMEM_DB_PATH = "path\to\codemem-card-v5.db"   # use a separate library, never migrate in place
-```
+Admission is mechanical: paths and qualified symbols written into narrative fields must occur
+in the chunks the card cites or they are stripped; conditions, files, symbols and pitfalls must
+be grounded in the cited evidence. A card whose problem or implement does not survive grounding
+is rejected as a phenomenon report, not a repair case. Empty `cards: []` is a legitimate result.
 
 ## Search: cards only
 

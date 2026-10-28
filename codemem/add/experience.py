@@ -1,9 +1,7 @@
 '''Session-scoped experience cards and versioned representations.
 
-Legacy repair cards use problem/locate/implement plus deterministic packets.
-Opt-in v5 cards describe individual state/action/mechanism/result attempts;
+Legacy repair cards use problem/locate/implement plus deterministic packets;
 their own field evidence, never a session-final patch/test run, bounds facts.
-Both formats share persistence and retrieval interfaces without conversion.
 '''
 
 from __future__ import annotations
@@ -12,23 +10,6 @@ import re
 from dataclasses import dataclass, replace
 from typing import Sequence
 
-from .attempt import (
-    PAYLOAD_VERSION as ATTEMPT_PAYLOAD_VERSION,
-)
-from .attempt import (
-    SYSTEM_PROMPT as ATTEMPT_SYSTEM_PROMPT,
-)
-from .attempt import (
-    FieldEvidence,
-    admission_problems,
-    bounded_text,
-    extraction_prompt,
-    is_v5,
-    prepare_attempt,
-    read_evidence,
-    render_attempt,
-    result_from_evidence,
-)
 from ..common.casebook import (
     CASE_PAYLOAD_VERSION,
     CONDITION_TYPES,
@@ -107,7 +88,7 @@ def infer_kind(*texts: object) -> str:
 
 @dataclass(frozen=True)
 class ExperienceCard:
-    '''Versioned card: legacy repair packet or evidence-bound v5 attempt.'''
+    '''Versioned card: legacy repair packet.'''
 
     experience_id: str
     user_id: str
@@ -137,24 +118,12 @@ class ExperienceCard:
     verify: VerifyRecipe | None = None
     pitfalls: tuple[str, ...] = ()
 
-    # v5 semantic content; legacy fields are intentionally NOT synthesized.
-    state: str | None = None
-    action: str | None = None
-    result: str | None = None
-    evidence: tuple[FieldEvidence, ...] = ()
-
-    @property
-    def is_attempt(self) -> bool:
-        return is_v5(self.extraction_version)
-
     @property
     def stable_id(self) -> str:
         return f'experience:{self.experience_id}'
 
     @property
     def has_narrative_fields(self) -> bool:
-        if self.is_attempt:
-            return bool(self.state and self.action and self.result)
         return any(isinstance(getattr(self, name), str) and getattr(self, name).strip()
                    for name in _CARD_FIELDS)
 
@@ -184,17 +153,6 @@ def _clip_text(value: object) -> str | None:
 
 
 def card_to_payload(card: ExperienceCard) -> dict:
-    if card.is_attempt:
-        return {
-            'payload_version': ATTEMPT_PAYLOAD_VERSION,
-            'experience_id': card.experience_id, 'user_id': card.user_id,
-            'session_id': card.session_id, 'kind': card.kind,
-            'extraction_version': card.extraction_version, 'created_at': card.created_at,
-            'state': bounded_text(card.state), 'action': bounded_text(card.action),
-            'mechanism': bounded_text(card.mechanism), 'result': bounded_text(card.result),
-            'source_chunk_ids': list(card.source_chunk_ids),
-            'evidence': [ref.to_dict() for ref in card.evidence],
-        }
     payload = {
         'experience_id': card.experience_id,
         'user_id': card.user_id,
@@ -240,25 +198,6 @@ def card_from_payload(raw: dict) -> ExperienceCard:
     if not isinstance(source_ids, list):
         source_ids = []
     source_ids = tuple(value for value in source_ids if isinstance(value, str) and value)
-    if is_v5(raw.get('extraction_version')) or raw.get('payload_version') == ATTEMPT_PAYLOAD_VERSION:
-        evidence = read_evidence(raw.get('evidence'))
-        result = result_from_evidence(evidence)
-        # Persisted v5 cards must retain the same evidence/result contract;
-        # never render an edited success summary over failed observations.
-        if (result != bounded_text(raw.get('result'))
-                or not all(any(ref.field == name for ref in evidence)
-                           for name in ('state', 'action', 'result'))
-                or any(ref.chunk_id not in source_ids for ref in evidence)):
-            result = None
-        return ExperienceCard(
-            experience_id=str(raw.get('experience_id', '')),
-            user_id=str(raw.get('user_id', '')), session_id=str(raw.get('session_id', '')),
-            kind=normalize_kind(raw.get('kind')) or 'debug', extraction_version='card-v5',
-            created_at=str(raw.get('created_at', '')),
-            state=bounded_text(raw.get('state')), action=bounded_text(raw.get('action')),
-            mechanism=bounded_text(raw.get('mechanism')) if any(ref.field == 'mechanism' for ref in evidence) else None,
-            result=result, source_chunk_ids=source_ids, evidence=evidence,
-        )
     fields = {name: _clean_text(raw.get(name)) for name in _CARD_FIELDS}
     mechanism = _clean_text(raw.get('mechanism'))
     spec = {name: _clean_text(raw.get(name))
@@ -383,7 +322,7 @@ def _implement_evidence_digest(window: Sequence[StoredChunk],
 
 
 def extraction_system_prompt(version: str) -> str:
-    return ATTEMPT_SYSTEM_PROMPT if is_v5(version) else _SYSTEM_PROMPT
+    return _SYSTEM_PROMPT
 
 
 def build_extraction_prompt(
@@ -393,8 +332,6 @@ def build_extraction_prompt(
     max_cards: int = 3,
     extraction_version: str = EXTRACTION_VERSION_DEFAULT,
 ) -> str:
-    if is_v5(extraction_version):
-        return extraction_prompt(window, max_cards)
     parts = [
         '修复案例 schema v2（字段可为空，没有依据就留空；所有字段内容用英文，逐字引用除外；每个事实只放一处）：',
         'kind: "debug"（缺陷/报错/回归）或 "feature"（新能力/接口/增强）',
@@ -446,11 +383,6 @@ _NARRATIVE_SYMBOL_RE = re.compile(
     r'[A-Za-z_][A-Za-z0-9_]{1,}(?:\.[A-Za-z_][A-Za-z0-9_]{1,})+'
     r'|[A-Z][A-Za-z0-9]*(?:Error|Exception|Warning|Fault)'
 )
-# v5 attempts only: any identifier carrying an underscore names a code fact
-# specifically (snake_case and _prefixed alike), so it must ground too.
-# Legacy packet cards keep the narrower heuristic (compatibility of existing
-# semantics).
-_ATTEMPT_SYMBOL_RE = re.compile(r'\b(?=\w*_)\w+\b')
 
 
 def _strip_ungrounded_anchors(text: str | None, source_text: str) -> str | None:
@@ -511,53 +443,6 @@ def _pitfall_grounded(pitfall: str, source_text: str) -> bool:
     return any(token in source_text for token in tokens)
 
 
-def _unsupported_attempt_fields(attempt: dict) -> list[str]:
-    """Narrative fields naming paths/symbols absent from their own evidence."""
-    unsupported: list[str] = []
-    for name in ('state', 'action', 'mechanism'):
-        value = attempt[name]
-        source = '\n'.join(ref.quote for ref in attempt['evidence']
-                           if ref.field == name).lower()
-        normalized_source = source.replace('\\', '/')
-        if any(
-            match.group(0).lower().replace('\\', '/') not in normalized_source
-            for pattern in (_NARRATIVE_PATH_RE, _NARRATIVE_SYMBOL_RE, _ATTEMPT_SYMBOL_RE)
-            for match in pattern.finditer(value or '')
-        ):
-            unsupported.append(name)
-    return unsupported
-
-
-def card_admission_problems(
-    proposed: list,
-    *,
-    chunks_by_id: dict,
-    user_id: str,
-    session_id: str,
-) -> list[str]:
-    """Labeled rejection reasons across the proposed cards, for repair feedback."""
-    problems: list[str] = []
-    for i, raw_card in enumerate(proposed[:4], 1):
-        if not isinstance(raw_card, dict):
-            problems.append(f"card{i}: 不是 JSON 对象")
-            continue
-        errs = admission_problems(raw_card, chunks_by_id,
-                                  user_id=user_id, session_id=session_id)
-        if errs:
-            problems.append(f"card{i}: " + "；".join(errs[:3]))
-            continue
-        attempt = prepare_attempt(raw_card, chunks_by_id,
-                                  user_id=user_id, session_id=session_id)
-        unsupported = _unsupported_attempt_fields(attempt) if attempt else []
-        if any(name != 'mechanism' for name in unsupported):
-            problems.append(
-                f"card{i}: 叙述中的路径/符号没有出现在该字段引用的原文里，"
-                "改写叙述或改引包含该符号的行")
-    if not problems:
-        problems.append("上一轮的 card 没有通过程序化准入")
-    return problems
-
-
 def _new_card_from_raw(
     raw_card: dict,
     *,
@@ -569,26 +454,6 @@ def _new_card_from_raw(
     created_at: str,
     grounding_chunks_by_id: dict[str, StoredChunk] | None = None,
 ) -> ExperienceCard | None:
-    if is_v5(extraction_version):
-        attempt = prepare_attempt(raw_card, chunks_by_id, user_id=user_id, session_id=session_id)
-        if attempt is None:
-            return None
-        # Per-field anchors must occur in that field's cited evidence. Never
-        # repair an unsupported claim by deleting a path from its sentence.
-        unsupported = _unsupported_attempt_fields(attempt)
-        if any(name != 'mechanism' for name in unsupported):
-            return None
-        if 'mechanism' in unsupported:
-            attempt['mechanism'] = None
-            attempt['evidence'] = tuple(ref for ref in attempt['evidence']
-                                        if ref.field != 'mechanism')
-        attempt['source_chunk_ids'] = tuple(cid for cid in attempt['source_chunk_ids']
-                                            if any(ref.chunk_id == cid for ref in attempt['evidence']))
-        return ExperienceCard(
-            experience_id=experience_id, user_id=user_id, session_id=session_id,
-            kind=resolve_kind(raw_card.get('kind'), attempt['state'], attempt['action']),
-            extraction_version=extraction_version, created_at=created_at, **attempt,
-        )
     fields = {name: _clean_text(raw_card.get(name)) for name in _CARD_FIELDS}
     spec = {name: _clean_text(raw_card.get(name))
             for name in ('implement_shape', 'implement_boundaries',
@@ -724,10 +589,6 @@ def enrich_card(card: ExperienceCard, chunks: Sequence[StoredChunk]) -> Experien
     diff, symbols and the verification recipe are extracted mechanically so
     the packet stays self-contained even when the model omits them.
     """
-    if card.is_attempt:
-        # A session-wide patch/result could belong to a later successful
-        # revision, not this (possibly failed or reverted) attempt.
-        return card
     packet = build_packet(card, chunks)
     return replace(
         card,
@@ -798,7 +659,7 @@ def _join_field_parts(parts: Sequence[object]) -> str:
 
 
 def card_field_texts(card: ExperienceCard) -> dict[str, str]:
-    """The index face: state-only in v5, field-aware repair facts in legacy.
+    """The index face: field-aware repair facts.
 
     A case packet has narrative *and* machine-extracted structure, and the
     narrative fields are populated too, so the two shapes cannot be an either/or
@@ -813,14 +674,6 @@ def card_field_texts(card: ExperienceCard) -> dict[str, str]:
     error literal on problem, a path or symbol on locate, a test node on test
     (``Store.experience_field_search``).
     """
-    if card.is_attempt:
-        anchors = card_entities(card, {})
-        return {
-            'problem': card.state or '',
-            'locate': _join_field_parts([value for kind, value in anchors
-                                        if kind in ('path', 'symbol', 'error', 'config_key')]),
-            'implement': '', 'test': '',
-        }
     conditions = list(card.conditions or ())
     verify = card.verify
     test_parts: list[object] = [
@@ -855,8 +708,6 @@ def card_field_terms(card: ExperienceCard) -> list[str]:
 
 
 def card_lexical_text(card: ExperienceCard) -> str:
-    if card.is_attempt:
-        return card.state or ''
     return '\n'.join(
         value for value in (card.problem, card.locate, card.implement) if value
     )
@@ -864,16 +715,12 @@ def card_lexical_text(card: ExperienceCard) -> str:
 
 def card_retrieval_text(card: ExperienceCard) -> str:
     """Un-fielded view of the index face, for probes that score one term bag."""
-    if card.is_attempt:
-        return card.state or ''
     return '\n'.join(value for value in card_field_texts(card).values() if value)
 
 
 def card_entities(card: ExperienceCard, chunks_by_id: dict[str, StoredChunk]) -> list[tuple[str, str]]:
     text = card_lexical_text(card)
-    if card.is_attempt:
-        text += '\n' + '\n'.join(ref.quote for ref in card.evidence if ref.field == 'state')
-    for chunk_id in (() if card.is_attempt else card.source_chunk_ids):
+    for chunk_id in card.source_chunk_ids:
         chunk = chunks_by_id.get(chunk_id)
         if chunk is not None:
             text += '\n' + chunk.text
@@ -944,10 +791,6 @@ def render_experience(
     persisted: bool = False,
     mode: str = "packet",
 ) -> str:
-    if card.is_attempt:
-        # All render modes share the tuple. Legacy hints, patch synthesis and
-        # scope footprints must not turn a historical attempt into an order.
-        return render_attempt(card, counter, max_tokens)
     # card-v2 abstract mode: only the three narrative fields plus the
     # mechanism face enter the model context -- no packet structure, no chunk
     # excerpts.  The retrieval face stays ``problem``; grounding was applied
@@ -1021,11 +864,6 @@ def render_experience(
 
 def card_anchors(card: ExperienceCard) -> list[tuple[str, str]]:
     """Structural anchors for the case index: files, symbols, conditions."""
-    if card.is_attempt:
-        kinds = {'path': 'file', 'symbol': 'symbol', 'error': 'error',
-                 'config_key': 'config', 'test_name': 'test_name'}
-        return list(dict.fromkeys((kinds[kind], value) for kind, value in card_entities(card, {})
-                                  if kind in kinds))
     anchors: list[tuple[str, str]] = []
     for path in card.files:
         anchors.append(("file", path.lower()))

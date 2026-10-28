@@ -7,7 +7,7 @@ health probe.
 
 Layout:
   common  - config, store, chunking, embeddings, llm, guard, tokens, casebook
-  add     - card extraction (card-v5 attempts in attempt.py, cards in experience.py)
+  add     - card extraction (cards in experience.py)
   search  - query features, retrieval, rerank, applicability
   service - MemoryService orchestrating Add and Search behind the API
 """
