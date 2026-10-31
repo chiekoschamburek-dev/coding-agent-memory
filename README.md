@@ -1,90 +1,107 @@
 # Code Memory System (codemem)
 
-Engineering-experience memory service for the **code track** of Agent Memory Challenge 2026.
-The system implements only **Add** and **Search**; the platform performs Answer, Eval and publication.
+Engineering-experience memory service for the **code track** of Agent Memory
+Challenge 2026. The system implements **Add** and **Search**; the platform
+performs Answer, Eval and publication.
 
-It turns historical engineering sessions into a **card library**: sessions are chunked losslessly
-into persisted facts, each closed session is distilled by `gpt-4o-mini` into at most three
-experience cards, and Search returns **cards** — ranked historical evidence, never an answer.
+This repository contains the algorithm extracted from `D:\桌面\project\memory`,
+synchronised on 2026-10-31. It retains the `add / search / common` package layout.
+Source modules are preserved with import-path adaptations and a repository-root
+path adjustment in `common/config.py`. Experiment scripts, datasets, databases
+and credentials are outside this repository's scope.
 
-> The service receives strings only: no repository access, no answer generation, no gold labels.
-> Raw messages are never stored; the chunk is the minimal persisted fact, and only cards are
-> ever returned.
+Incoming messages are chunked losslessly into persisted facts. Closed sessions
+are distilled by `gpt-4o-mini` into experience cards; Search returns ranked
+historical evidence. Raw message bodies are never stored as separate records.
+Cards are preferred; optional pending-session fallback can return persisted
+chunk excerpts until extraction succeeds.
 
 ## Repository layout
 
-```
+```text
 codemem/
-├── common/     shared infrastructure: config, store (SQLite), chunking, embeddings,
-│               llm client, request guard, token counting, casebook (deterministic packets)
-├── add/        the Add algorithm: chunking-driven ingestion and card extraction
-│   └── experience.py    versioned card model, admission, payload, index face
-├── search/     the Search algorithm
-│   ├── query.py         query feature extraction (entities, anchors, term groups)
-│   ├── retrieval.py     4-channel recall + RRF fusion + deterministic floor
-│   ├── rerank.py        external rerank client (fails soft)
-│   └── applicability.py listwise applicability judge (soft, never drops)
-├── service.py  MemoryService: orchestrates Add and Search behind the API
-├── api.py      FastAPI app exposing /add, /search, /healthz
-└── main.py     uvicorn entrypoint
+├── common/                 shared infrastructure
+│   ├── config.py           environment settings and repository paths
+│   ├── store.py            SQLite schema v9, sessions, cards and indexes
+│   ├── chunking.py         lossless chunks and entity extraction
+│   ├── embeddings.py       embedding client and model concurrency limiter
+│   ├── embedding_cache.py  SQLite cache, byte-bounded LRU and legacy import
+│   ├── casebook.py         deterministic card-v4 repair packets
+│   └── llm.py / guard.py / tokens.py
+├── add/
+│   ├── experience.py       versioned card interface, extraction and admission
+│   └── minimal.py          card-v5-minimal evidence, admission and rendering
+├── search/
+│   ├── query.py            query features, entities and anchors
+│   ├── retrieval.py        card recall, RRF fusion and output admission
+│   ├── applicability.py    soft listwise applicability judge
+│   ├── transferability.py minimal-card hypothesis and batch grouping
+│   └── rerank.py           external rerank client
+├── service.py              Add / Search orchestration
+├── api.py                  FastAPI endpoints
+└── main.py                 uvicorn entrypoint
+tests/                      adapted algorithm and API regression suite
 ```
 
-## Storage form (schema v8)
+## Storage and card formats
 
-| Layer | Stored? | Purpose |
+Schema v9 stores chunks, session extraction status/version, cards, card lexical
+indexes and card vectors. Chunks are evidence rather than embedding/retrieval
+units, except for the optional pending-session fallback.
+
+| Version | Shape | Use |
 | --- | --- | --- |
-| Raw messages | **no** | chunked on arrival; bodies never land in the DB |
-| Chunks | yes | the minimal facts; lossless segments, kept forever, evidence for cards |
-| Cards | yes | the retrieval unit: `problem / locate / implement` + grounded structure (`files/symbols/conditions/pitfalls`) + deterministic `patch/verify`; ≤3 per session |
-| Card vectors | yes | the **only** embedding store (`text-embedding-v4`, index face of the card) |
-| Meta | yes | cross-session aggregated rules; cites ≥2 cards from ≥2 different sessions; no paths/patches |
-| Chunk lexical index / chunk vectors | **no** | chunks are facts, not retrieval items |
+| `card-v4` | `problem / locate / implement`, grounded structure and deterministic `patch / verify` | default; at most three repair cards per session |
+| `card-v5-minimal` | `problem / mechanism / verify` | opt-in; one idea-level card per session |
 
-## Add: evidence-grounded cards
+`card-v4` grounds paths, symbols and conditions in cited chunks. Patch and
+verification packets are derived from the evidence rather than accepted from
+model output.
 
-Each closed session is distilled by `gpt-4o-mini` into at most three experience cards
-(`card-v4`): a `problem / locate / implement` repair case plus grounded structure
-(`files / symbols / conditions / pitfalls`) and a deterministic `patch / verify` packet.
+`card-v5-minimal` describes the historical cause and observable acceptance
+semantics. The evidence window prefers the closing summary, removes fix
+sections, and keeps testing evidence separately. If no summary exists, the
+summary fallback (enabled by default) reconstructs evidence around the final fix
+diff. Admission rejects paths, line numbers, commands, diffs and fix instructions;
+code identifiers must occur in the evidence. Cards that exceed the render
+budget are omitted rather than truncated.
 
-- `problem` is the retrieval face: symptoms and trigger conditions written in the issue's
-  own vocabulary, before any fix is known.
-- `implement` carries the acceptance-tested requirement shape of this class of fix
-  (`implement_shape / boundaries / acceptance`), not the historical change narrative.
-- `conditions` are facts (versions, modules, error literals), never an applicability verdict;
-  `patch` and `verify` are derived deterministically from the cited evidence, never accepted
-  from model output.
-
-Admission is mechanical: paths and qualified symbols written into narrative fields must occur
-in the chunks the card cites or they are stripped; conditions, files, symbols and pitfalls must
-be grounded in the cited evidence. A card whose problem or implement does not survive grounding
-is rejected as a phenomenon report, not a repair case. Empty `cards: []` is a legitimate result.
-
-## Search: cards only
-
-- **Card channels (4):** field-aware BM25 over the card index face
-  (`problem/locate/implement/test` groups), exact card entities, IDF-weighted case anchors
-  (files/symbols/errors), and the **card's own embedding**. Fusion is RRF over ranks (`k=60`).
-- **Deterministic floor:** a card must reach `CODEMEM_MIN_SCORE_RATIO` (0.15) of the response's
-  best score to enter `data` (with `min_output_items` kept regardless). Chunks are never
-  returned as items.
-- **Soft stages:** the card ranking's top **20** candidates go to listwise applicability
-  (tri-state, gpt-4o-mini, soft) and then to the external reranker API — recall 20 → rerank 20 →
-  floor + final cut (`qwen3-rerank` via `RERANK_*`, fusion `alpha=0.3`). Both may reorder but
-  never drop, and both fail soft.
+Use a separate database for each extraction version. Finalisation refuses to
+replace existing cards across a version boundary.
 
 ## Session lifecycle
 
-The API offers no "session finished" signal, so a session is closed the moment an Add with a
-different `session_id` arrives.
+1. **Add:** validate, reserve the idempotency key, chunk and commit. Success means
+   the chunks and pending session state are persisted.
+2. **Finalise:** an Add with a different `session_id` finalises older pending
+   sessions. Search also finalises pending sessions as a backstop. The session's
+   cards are replaced together, then embedded.
+3. **Failure:** model failures leave the session pending and preserve previous
+   cards. A successful extraction with zero admissible cards marks it extracted.
 
-1. **Add (sync, zero LLM):** validate → idempotency reserve → chunk → commit chunks + session
-   row (`pending`). `success: true` means persisted.
-2. **Finalise (best-effort, gpt-4o-mini):** when an Add sees a *different* session_id, every
-   still-pending older session is finalised — its whole timeline is extracted into ≤3 cards in
-   bounded batches, the session's previous cards are **replaced** (idempotent for re-opened
-   sessions), then cards are embedded.
-3. **Search backstop:** before retrieval, every still-pending session of the scope is finalised,
-   so the last session of an Add stream also gets cards.
+Add, extraction and Search are serialised within each user scope so Search
+cannot observe partial card replacement and newer Adds remain pending.
+Optional background finalisation starts extraction after Add; optional pending
+fallback makes persisted chunk excerpts available before cards exist.
+
+## Search
+
+Four card channels provide field-aware BM25, exact entities, IDF-weighted
+anchors and card embeddings (`text-embedding-v4`). Request `options` can supply
+a de-weighted probe. Reciprocal-rank fusion uses `k=60`; a deterministic score
+floor controls admission, followed by content budgets and `top_k` (at most 100).
+
+The applicability judge and external reranker are soft, fail-open stages.
+Minimal cards must earn a channel hit, receive no `min_output_items` padding,
+and skip the legacy repair judge.
+
+The optional minimal-card transferability policy replaces the external reranker.
+It analyses the issue once and judges at most 20 cards in one batch. Groups are
+transferable first; topic-related, unknown and unjudged in the middle; irrelevant
+last. It keeps candidates and their admission scores. Transferable results carry
+a separately labelled, unverified query-time hypothesis and issue quote, without
+changing stored cards. Grouped API responses omit `score`; failures preserve
+baseline ordering. The two model calls share a 60-second budget by default.
 
 ## API contract
 
@@ -92,35 +109,32 @@ different `session_id` arrives.
 
 ```json
 {
-  "request_id": "eval:<run_id>:conv-0:chunk-0",
+  "request_id": "eval:run:conv-0:chunk-0",
   "messages": [{"role": "user", "timestamp": 1704067200000, "content": "raw memory text"}],
-  "user_id": "eval:<run_id>:conv-0",
-  "session_id": "eval:<run_id>:sample:0"
+  "user_id": "eval:run:conv-0",
+  "session_id": "eval:run:sample:0"
 }
 ```
 
-Response echoes `request_id` / `user_id` / `session_id` with `success: true` once persisted and
-immediately retrievable.
+The response echoes the identifiers with `success: true` after persistence.
 
 `POST /search`
 
 ```json
 {
-  "query": "Which answer best matches the memory?",
-  "options": ["A. First answer", "B. Second answer"],
-  "user_id": "eval:<run_id>:conv-0",
+  "query": "Which historical experience matches this issue?",
+  "options": ["A. First choice", "B. Second choice"],
+  "user_id": "eval:run:conv-0",
   "top_k": 100
 }
 ```
 
-Response:
-
 ```json
-{"data": [{"id": "mem_123", "content": "remembered fact text", "score": 0.87, "created_at": "2026-07-01T12:00:00Z"}]}
+{"data": [{"id": "mem_123", "content": "historical evidence", "score": 0.87, "created_at": "2026-07-01T12:00:00Z"}]}
 ```
 
-`options` is sent for multiple-choice questions only; `top_k` is fixed at 100 in external
-evaluation. `data` is ranked by relevance and may be empty.
+`options` is optional. Results may be empty; `score` and `created_at` are optional.
+Health probes are available at `/health` and `/healthz`.
 
 ## Quick start
 
@@ -129,10 +143,38 @@ pip install -r requirements.txt
 python -m uvicorn codemem.main:app --host 0.0.0.0 --port 8080
 ```
 
-## Configuration
+All settings are environment-based. A repository-root `.env` is loaded without
+overriding existing environment variables. The complete setting list is in
+`codemem/common/config.py`.
 
-All configuration is environment-based; nothing is required for a local run. A `.env` file at
-the repo root is loaded automatically (real environment variables always win). The full tunable
-list lives in `codemem/common/config.py`; the operational keys cover the LLM/embedding endpoints,
-`RERANK_*` (external reranker), `CODEMEM_*` (thresholds, batch sizes, extraction version), and
-the API key guard.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CODEMEM_EXPERIENCE_EXTRACTION_VERSION` | `card-v4` | select `card-v4` or `card-v5-minimal` |
+| `CODEMEM_DB_PATH` | repository-root `data/codemem.db` | scoped memory store |
+| `CODEMEM_MINIMAL_SUMMARY_FALLBACK` | `true` | reconstruct minimal evidence without a summary |
+| `CODEMEM_FINALIZE_BACKGROUND` | `false` | extract the just-written session in the background |
+| `CODEMEM_SEARCH_PENDING_FALLBACK` | `false` | return pending-session chunk excerpts |
+| `CODEMEM_TRANSFERABILITY_ENABLED` | `false` | enable minimal-card transferability grouping |
+| `CODEMEM_EMBED_CACHE_MEMORY_MB` | `16` | in-memory embedding-cache byte budget |
+
+Configure `CODEMEM_LLM_*`, `CODEMEM_EMBED_*`, `RERANK_*` and `CODEMEM_API_KEY`
+for model endpoints and API authentication. For transferability grouping, allow
+enough search time for its model-call budget, for example
+`CODEMEM_SEARCH_HARD_BUDGET_S=90`.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The suite covers extraction, minimal-card admission, session concurrency,
+transferability, embedding caching, retrieval, API contracts and scope isolation.
+Tests for offline library/view/index-building scripts are excluded because those
+scripts are outside the extracted algorithm repository.
+
+Verification on Windows (2026-10-31): 279 passed, one failed. The embedding-cache
+cross-instance concurrent-initialisation test also fails against the unchanged
+source project with an SQLite `OperationalError`; this sync preserves that source
+implementation.

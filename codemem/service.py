@@ -22,30 +22,46 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
+import weakref
 from dataclasses import dataclass, field
-from uuid import uuid4
+from functools import wraps
 
+from .search.applicability import ListwiseApplicabilityJudge
 from .common.chunking import build_chunks
 from .common.config import Settings, get_settings
 from .common.embeddings import get_embedder, get_model_limiter, pack_vector
-from .search.applicability import ListwiseApplicabilityJudge
+from .search.transferability import MinimalTransferabilityJudge
 from .add.experience import (
-    extraction_system_prompt,
     build_cards,
     build_extraction_prompt,
+    card_admission_problems,
     card_anchors,
     card_entities,
     card_field_terms,
-    card_from_payload,
     card_retrieval_text,
     card_to_payload,
     enrich_card,
+    extraction_system_prompt,
     is_setup_chunk,
     render_experience,
 )
 from .common.guard import MODE_FULL, ModuleBudget, get_guard
 from .common.llm import get_llm
+from .add.minimal import (
+    VERSION as MINIMAL_VERSION,
+)
+from .add.minimal import (
+    build_evidence as build_minimal_evidence,
+)
+from .add.minimal import (
+    build_prompt as build_minimal_prompt,
+)
+from .add.minimal import (
+    is_minimal,
+    render_minimal,
+)
 from .search.rerank import HttpReranker
 from .search.retrieval import SearchEngine, StoreExperienceVectorIndex
 from .common.store import (
@@ -59,7 +75,7 @@ from .common.store import (
 )
 from .common.tokens import get_counter
 
-_FINAL_DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+)", re.M)
+_FINAL_DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+)", re.MULTILINE)
 
 
 def _final_diff_files(chunks) -> frozenset:
@@ -70,7 +86,6 @@ def _final_diff_files(chunks) -> frozenset:
     no such chunk exists (the clamp then no-ops -- soft by design, the final
     diff is a harness convention, not a guarantee).
     """
-    import re as _re
 
     for chunk in reversed(chunks):
         text = getattr(chunk, "text", "") or ""
@@ -89,7 +104,7 @@ def _clamp_files_to_final_diff(card, final_files: frozenset):
     and the injected scope prior.  When the card shares no file with the
     final diff at all, keep the original (parse failure must not gut a card).
     """
-    if not final_files or not card.files:
+    if card.is_minimal or not final_files or not card.files:
         return card
     clamped = tuple(f for f in card.files if f.rsplit("/", 1)[-1] in final_files)
     if not clamped or clamped == card.files:
@@ -142,6 +157,26 @@ class ModelCallBudget:
         return True
 
 
+_CONTENT_WORD = re.compile(r"[a-z0-9_]{3,}")
+
+
+def _content_words(text: str) -> list[str]:
+    """Distinct low-impedance query terms for the pending-chunk fallback."""
+    return list(dict.fromkeys(_CONTENT_WORD.findall(text.lower())))
+
+
+def _serialize_scope(method):
+    """Keep one scope's reads and card replacement consistent across threads."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        user_id = kwargs.get("user_id")
+        if not isinstance(user_id, str) or not user_id:
+            return method(self, *args, **kwargs)
+        with self._scope_lock(user_id):
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class MemoryService:
     def __init__(
         self,
@@ -152,6 +187,14 @@ class MemoryService:
     ) -> None:
         self.store = store
         self.settings = settings or get_settings()
+        self._scope_locks = weakref.WeakValueDictionary()
+        self._scope_locks_guard = threading.Lock()
+
+        # Background finalisation (contract: persisted => immediately
+        # retrievable).  At most one worker per user scope; Search's backstop
+        # remains the fallback for anything the worker did not finish.
+        self._bg_finalize_users: set[str] = set()
+        self._bg_finalize_lock = threading.Lock()
 
         # The LLM client is created lazily and injectable: experience extraction
         # is best-effort enrichment, so a missing/failing provider must degrade
@@ -175,9 +218,9 @@ class MemoryService:
                     self.store, self.embedder, self.settings.embed_model,
                     timeout_s=self.settings.embed_timeout_s,
                 )
-            judge = ListwiseApplicabilityJudge(
-                self._llm or get_llm(self.settings), self.settings
-            )
+            llm = self._llm or get_llm(self.settings)
+            judge = ListwiseApplicabilityJudge(llm, self.settings)
+            transfer_judge = MinimalTransferabilityJudge(llm, self.settings)
             reranker = (
                 HttpReranker(
                     self.settings.rerank_base_url,
@@ -185,16 +228,26 @@ class MemoryService:
                     api_key=self.settings.rerank_api_key,
                     model=self.settings.rerank_model,
                 )
-                if self.settings.rerank_base_url
+                if self.settings.rerank_base_url and not self.settings.transferability_enabled
                 else None
             )
             self.search_engine = SearchEngine(
                 self.store, self.settings,
                 judge=judge, reranker=reranker,
                 card_vector_index=card_vector_index,
+                transferability_judge=transfer_judge,
             )
         self.guard = get_guard(self.settings)
         self.counter = get_counter(self.settings)
+
+    def _scope_lock(self, user_id: str):
+        # Waiters retain strong references; unused scope locks can disappear.
+        with self._scope_locks_guard:
+            lock = self._scope_locks.get(user_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._scope_locks[user_id] = lock
+            return lock
 
     # -- validation ------------------------------------------------------
 
@@ -284,6 +337,7 @@ class MemoryService:
 
     # -- add -------------------------------------------------------------
 
+    @_serialize_scope
     def add(
         self,
         *,
@@ -398,6 +452,8 @@ class MemoryService:
                 "name": "finalize", "duration_ms": 0, "skipped": True,
                 "reason": f"mode={mode}" if mode != MODE_FULL else "experience_disabled",
             })
+        enrichment_steps.append(
+            self._spawn_background_finalize(user_id, state.ingestion_id))
 
         total_ms = int((time.monotonic() - started) * 1000)
 
@@ -425,12 +481,56 @@ class MemoryService:
 
     # -- session finalisation ----------------------------------------------
 
+    def _spawn_background_finalize(self, user_id: str, trigger_ingestion_id: int) -> dict:
+        """Extract cards for the just-written session off the Add critical path.
+
+        The Add contract requires ``success=true`` to imply immediate
+        retrievability; card extraction is LLM-bound, so it must not run inside
+        the Add response.  The worker finalises every pending session of the
+        scope (the sync path above already closed the ones it had time for),
+        bounded by the same enrichment budget it would have had inline.  The
+        Search backstop stays as the fallback for anything this does not
+        finish.  Failures leave the session pending and are retried there.
+        """
+        if not self.settings.finalize_background or not self.settings.experience_enabled:
+            return {"name": "finalize_background", "duration_ms": 0, "skipped": True,
+                    "reason": "disabled"}
+        with self._bg_finalize_lock:
+            if user_id in self._bg_finalize_users:
+                # A worker for this scope is already running; its pending scan
+                # plus the next Search's backstop cover the new session.
+                return {"name": "finalize_background", "duration_ms": 0, "skipped": True,
+                        "reason": "worker_in_flight"}
+            self._bg_finalize_users.add(user_id)
+
+        def _run() -> None:
+            try:
+                self._finalize_closed_sessions(
+                    user_id=user_id,
+                    current_session_id=None,
+                    trigger_ingestion_id=trigger_ingestion_id,
+                    budget_override=self.settings.add_enrich_budget_s,
+                )
+            except Exception:
+                # Never surface background enrichment as an Add failure; the
+                # session stays pending and the Search backstop retries it.
+                pass
+            finally:
+                with self._bg_finalize_lock:
+                    self._bg_finalize_users.discard(user_id)
+
+        threading.Thread(target=_run, name=f"finalize:{user_id}",
+                         daemon=True).start()
+        return {"name": "finalize_background", "duration_ms": 0, "skipped": False}
+
+    @_serialize_scope
     def _finalize_closed_sessions(
         self,
         *,
         user_id: str,
         current_session_id: str | None,
         trigger_ingestion_id: int,
+        budget_override: float | None = None,
     ) -> list[dict]:
         """Extract cards for every closed session of this scope.
 
@@ -450,8 +550,11 @@ class MemoryService:
                      "reason": "no_closed_sessions"}]
         steps: list[dict] = []
         for session_id in pending:
+            base_budget = self.settings.experience_budget_s
+            if budget_override is not None:
+                base_budget = budget_override
             deadline = _time.monotonic() + min(
-                self.settings.experience_budget_s,
+                base_budget,
                 self.settings.add_enrich_budget_s,
             )
             if deadline - _time.monotonic() <= 0.5:
@@ -469,6 +572,7 @@ class MemoryService:
             )
         return steps
 
+    @_serialize_scope
     def _finalize_session(
         self,
         *,
@@ -490,6 +594,14 @@ class MemoryService:
 
         started = _time.monotonic()
         step: dict = {"name": "finalize", "session": session_id}
+        version = self.settings.experience_extraction_version
+        existing = self.store.session_extraction_versions(user_id, session_id)
+        # Cross-form replacement is unsafe: card-v4 packets and idea-level
+        # cards carry different provenance contracts.  Keep any existing card
+        # unless the session is re-extracted by the same version.
+        if existing - {version}:
+            return {**step, "duration_ms": 0, "skipped": True,
+                    "reason": "extraction_version_conflict"}
         llm = self._llm or get_llm(self.settings)
         if not getattr(llm, "configured", False):
             return {**step, "duration_ms": 0, "skipped": True,
@@ -513,10 +625,15 @@ class MemoryService:
                     "skipped": True, "reason": "setup_only", "cards": 0}
 
         call_budget = ModelCallBudget(self.settings.extract_calls_per_finalization)
+        # The card-v4 setup filter protects a repair-packet window; the
+        # idea-level extractor needs the closing summary even when its first
+        # lines mention a clone/install.  It has its own noise filters.
+        extract_keep = session_chunks if is_minimal(
+            self.settings.experience_extraction_version) else keep
         cards, extraction_ok, extract_stats = self._extract_session_cards(
             user_id=user_id,
             session_id=session_id,
-            keep=keep,
+            keep=extract_keep,
             deadline=deadline,
             call_budget=call_budget,
         )
@@ -529,7 +646,7 @@ class MemoryService:
                     "skipped": True, "reason": extract_stats.get("reason") or "extraction_failed"}
 
         self.store.delete_session_experiences(user_id, session_id)
-        chunks_by_id = {chunk.chunk_id: chunk for chunk in keep}
+        chunks_by_id = {chunk.chunk_id: chunk for chunk in extract_keep}
         stored_ids = self._store_extracted_cards(
             cards,
             user_id=user_id,
@@ -549,6 +666,113 @@ class MemoryService:
         })
         return step
 
+    def _extract_minimal_card(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        keep: list,
+        deadline: float,
+        call_budget: ModelCallBudget,
+    ) -> tuple[list, bool, dict]:
+        """One idea-level card from a curated issue + final-summary window.
+
+        The full session timeline is not shown to the model: the final summary
+        is the mechanism source, the first message is the retrieval face and
+        test-shaped chunks are the acceptance-semantics source.  This keeps the
+        call small, makes the noise/signal split explicit, and removes the
+        historical action from the input before the model can copy it.
+        """
+        import time as _time
+
+        stats = {"window": len(keep), "batches": 1, "calls": 0, "repairs": 0,
+                 "rejected_cards": 0, "reason": None, "mode": "minimal"}
+        evidence = build_minimal_evidence(
+            keep, summary_fallback=self.settings.minimal_summary_fallback)
+        if not evidence.is_usable():
+            # No issue, or no closing summary and no fix diff to reconstruct
+            # from: there is nothing to ground an idea-level card in.  Mark
+            # the session extracted so a Search does not retry an incomplete
+            # timeline forever.
+            return [], True, {**stats, "reason": "no_issue_or_summary"}
+        if evidence.is_fallback:
+            stats["mode"] = "minimal_fallback"
+
+        llm = self._llm or get_llm(self.settings)
+        if not getattr(llm, "configured", False):
+            return [], False, {**stats, "reason": "llm_not_configured"}
+
+        chunks_by_id = {chunk.chunk_id: chunk for chunk in evidence.chunks}
+        repair_notes: list[str] = []
+        last_reason = "minimal_admission_failed"
+        for attempt in range(2):
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0.5:
+                return [], False, {**stats, "reason": "budget_exhausted"}
+            if not call_budget.take():
+                return [], False, {**stats, "reason": "call_budget"}
+            limiter = get_model_limiter(self.settings)
+            if not limiter.acquire():
+                return [], False, {**stats, "reason": "model_concurrency"}
+            stats["calls"] += 1
+            try:
+                user = build_minimal_prompt(evidence, 1)
+                if repair_notes:
+                    user += (
+                        "\n上一轮输出的 card 未通过程序化准入校验，具体问题：\n"
+                        + "\n".join(f"- {note}" for note in repair_notes)
+                        + "\n请只修正这些问题并重新输出完整 JSON；仍无依据时输出 "
+                          '{"cards":[]}。'
+                    )
+                parsed, result = llm.complete_json(
+                    system=extraction_system_prompt(MINIMAL_VERSION),
+                    user=user,
+                    max_tokens=self.settings.experience_max_output_tokens,
+                    timeout_s=remaining,
+                )
+            except Exception:
+                last_reason = "llm_error"
+                continue
+            finally:
+                limiter.release()
+            if getattr(result, "raw_finish_reason", None) == "length":
+                last_reason = "truncated"
+                continue
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("cards"), list):
+                last_reason = "parse_error"
+                continue
+            proposed = parsed["cards"]
+            if not proposed:
+                # An explicit "no transferable experience" verdict is a valid
+                # outcome and may replace previous cards.
+                return [], True, {**stats, "reason": "no_experience"}
+            stats["rejected_cards"] += len(proposed)
+            cards = build_cards(
+                raw=parsed,
+                chunks_by_id=chunks_by_id,
+                grounding_chunks_by_id=chunks_by_id,
+                user_id=user_id,
+                session_id=session_id,
+                id_for=lambda i: experience_id_for(user_id, session_id, i),
+                extraction_version=MINIMAL_VERSION,
+                created_at=now_iso(),
+                max_cards=1,
+                mechanism_source="reconstructed" if evidence.is_fallback else "summary",
+            )
+            if cards:
+                stats["rejected_cards"] -= 1
+                return cards, True, stats
+            last_reason = "minimal_admission_failed"
+            repair_notes = card_admission_problems(
+                proposed,
+                chunks_by_id=chunks_by_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if attempt == 0:
+                stats["repairs"] += 1
+        return [], False, {**stats, "reason": last_reason}
+
     def _extract_session_cards(
         self,
         *,
@@ -567,30 +791,50 @@ class MemoryService:
         """
         import time as _time
 
+        if is_minimal(self.settings.experience_extraction_version):
+            return self._extract_minimal_card(
+                user_id=user_id, session_id=session_id, keep=keep,
+                deadline=deadline, call_budget=call_budget,
+            )
+
         llm = self._llm or get_llm(self.settings)
         batch_size = max(1, self.settings.experience_session_max_chunks)
         max_calls = max(1, call_budget.limit)
         batches = [keep[i : i + batch_size] for i in range(0, len(keep), batch_size)]
+        # The issue statement lives in the session's first chunks (batch 1).
+        # A batch-2+ window without it cannot anchor a card's state to the
+        # original symptoms, so every later window prepends a small problem
+        # digest. Its chunks are first-class, citable evidence and join the
+        # admission universe (no synthetic text is injected).
+        prefix: list = []
+        prefix_chars = 0
+        for chunk in keep[:3]:
+            prefix.append(chunk)
+            prefix_chars += len(chunk.text)
+            if prefix_chars >= 1200:
+                break
         truncated = len(batches) > max_calls
         batches = batches[:max_calls]
         cards: list = []
         seen: set[tuple] = set()
         calls = 0
         retries = 0
-        repairs = 0
         truncations = 0
-        rejected_cards = 0
         reason = None
         extraction_ok = False
         card_index = 0
 
-        def id_for(_local: int) -> str:
+        def reserve_ids(n: int) -> int:
+            """Reserve a contiguous experience-id block across batches."""
             nonlocal card_index
-            experience_id = experience_id_for(user_id, session_id, card_index)
-            card_index += 1
-            return experience_id
+            base = card_index
+            card_index += max(1, n)
+            return base
 
-        def call_model(batch, card_hint: int | None):
+        def id_block_for(base: int):
+            return lambda i, _b=base: experience_id_for(user_id, session_id, _b + i)
+
+        def call_model(batch, card_hint: int | None = None):
             """One extraction call: (parsed, result, failure_reason)."""
             remaining = deadline - _time.monotonic()
             if remaining <= 0.5:
@@ -621,19 +865,20 @@ class MemoryService:
             finally:
                 limiter.release()
 
-        for batch in batches:
+        for batch_no, batch in enumerate(batches):
             if not call_budget.take():
                 reason = "call_budget"
                 break
+            window = batch if batch_no == 0 else prefix + batch
             calls += 1
-            raw, result, failure = call_model(batch, None)
+            raw, result, failure = call_model(window)
             cut = getattr(result, "raw_finish_reason", None) == "length"
             if cut:
                 truncations += 1
             # A completion cut at the token ceiling loses the whole batch: the
             # JSON never parses, so the session silently contributes nothing.
-            # One cheaper retry (fewer cards, same evidence) is much better
-            # than a hole in the library, and it stays inside the budget.
+            # One cheaper retry (fewer cards, same evidence) is better than a
+            # hole in the library, and it stays inside the budget.
             if (
                 (not isinstance(raw, dict) or cut)
                 and deadline - _time.monotonic() > 1.0
@@ -641,19 +886,21 @@ class MemoryService:
             ):
                 calls += 1
                 retries += 1
-                raw, result, failure = call_model(batch, 2)
+                raw, result, failure = call_model(window, 2)
                 cut = getattr(result, "raw_finish_reason", None) == "length"
                 if cut:
                     truncations += 1
-            if isinstance(raw, dict):
-                extraction_ok = True
             if failure:
                 reason = failure
                 continue
             if not isinstance(raw, dict):
                 reason = "truncated" if cut else "parse_error"
                 continue
-            batch_by_id = {chunk.chunk_id: chunk for chunk in batch}
+            if cut:
+                reason = "truncated"
+                continue
+            extraction_ok = True
+            batch_by_id = {chunk.chunk_id: chunk for chunk in window}
             max_cards = self.settings.experience_max_cards_per_session
             new_cards = build_cards(
                 raw=raw,
@@ -661,7 +908,7 @@ class MemoryService:
                 grounding_chunks_by_id={chunk.chunk_id: chunk for chunk in keep},
                 user_id=user_id,
                 session_id=session_id,
-                id_for=id_for,
+                id_for=id_block_for(reserve_ids(max_cards)),
                 extraction_version=self.settings.experience_extraction_version,
                 created_at=now_iso(),
                 max_cards=max_cards,
@@ -673,14 +920,15 @@ class MemoryService:
                 seen.add(key)
                 cards.append(card)
 
+        if len(cards) > self.settings.experience_max_cards_per_session:
+            cards = cards[: self.settings.experience_max_cards_per_session]
+
         stats = {
             "window": len(keep),
             "batches": len(batches),
             "calls": calls,
             "retries": retries,
-            "repairs": repairs,
             "truncations": truncations,
-            "rejected_cards": rejected_cards,
             "truncated": truncated,
             "reason": reason,
         }
@@ -707,12 +955,20 @@ class MemoryService:
         written = []
         for card in cards:
             try:
-                card = enrich_card(card, enrich_pool)
-                card = _clamp_files_to_final_diff(card, final_files)
-                full_content = render_experience(
-                    card, render_chunks, self.counter, default_cap,
-                    self.settings.experience_quote_max_chars,
-                )
+                if card.is_minimal:
+                    # No deterministic packet: the three idea-level faces are
+                    # the complete card.
+                    full_content = render_minimal(card, self.counter, None)
+                else:
+                    card = enrich_card(card, enrich_pool)
+                    card = _clamp_files_to_final_diff(card, final_files)
+                    # Persist complete card content even if a later query has
+                    # a smaller per-item budget. Retrieval may omit, never
+                    # amputate.
+                    full_content = render_experience(
+                        card, render_chunks, self.counter, default_cap,
+                        self.settings.experience_quote_max_chars,
+                    )
                 if not full_content.strip():
                     continue
                 self.store.insert_experience(
@@ -770,6 +1026,7 @@ class MemoryService:
         except Exception:
             return 0
 
+    @_serialize_scope
     def search(
         self,
         *,
@@ -802,6 +1059,7 @@ class MemoryService:
             user_id=user_id,
             current_session_id=None,
             trigger_ingestion_id=0,
+            budget_override=self.settings.search_backstop_budget_s,
         )
         finalized_sessions = [
             step for step in finalized
@@ -820,6 +1078,13 @@ class MemoryService:
             options=parsed_options,
             deadline=budget,
         )
+
+        pending_items = self._pending_session_items(
+            user_id, query, parsed_options,
+            slots=top_k - len(data), have_cards=bool(data))
+        if pending_items:
+            data = data + pending_items
+
         elapsed_ms = int((time.monotonic() - started) * 1000)
         diag.elapsed_ms = elapsed_ms
 
@@ -829,6 +1094,7 @@ class MemoryService:
             "after_dedup": diag.after_dedup,
             "selected": len(data),
             "finalized_sessions": len(finalized_sessions),
+            "pending_fallback": len(pending_items),
             "dropped_duplicate": diag.dropped_duplicate,
             "dropped_budget": diag.dropped_budget,
             "dropped_final": diag.dropped_final,
@@ -843,3 +1109,64 @@ class MemoryService:
             "budget_exceeded": elapsed_ms > self.settings.search_budget_p95_s * 1000,
         }
         return SearchOutcome(data=data, diagnostics=diagnostics)
+
+    def _pending_session_items(
+        self,
+        user_id: str,
+        query: str,
+        options: object,
+        *,
+        slots: int,
+        have_cards: bool,
+    ) -> list[dict]:
+        """Provisional raw-chunk items for sessions that have no card yet.
+
+        api_guide.md: Add's ``success=true`` means "persisted and immediately
+        retrievable".  Card extraction is LLM-bound and asynchronous, so a
+        Search issued right after Add can face sessions with no card.  This
+        fallback surfaces their raw chunks as one provisional item per session,
+        scored by lexical overlap with the query; once the session is
+        finalised it leaves ``pending`` and its card replaces this item.
+        Cards always take precedence: the items only fill slots the card
+        ranking left free, and a zero-overlap session is dropped unless there
+        are no card results at all.
+        """
+        if not self.settings.search_pending_fallback or slots <= 0:
+            return []
+        limit = min(self.settings.pending_fallback_max_sessions, slots)
+        pending = self.store.pending_sessions(user_id)[:limit]
+        if not pending:
+            return []
+        option_text = ""
+        if isinstance(options, list):
+            option_text = " ".join(str(o) for o in options if isinstance(o, str))
+        query_words = set(_content_words(f"{query} {option_text}"))
+        items: list[dict] = []
+        for session_id in pending:
+            chunks = self.store.fetch_session_chunks(user_id, session_id)
+            parts: list[str] = []
+            used = 0
+            for chunk in chunks:
+                text = chunk.text.strip()
+                if not text:
+                    continue
+                if used + len(text) > self.settings.pending_fallback_max_chars:
+                    break
+                parts.append(text)
+                used += len(text) + 2
+            if not parts:
+                continue
+            content = "\n\n".join(parts)
+            lowered = content.lower()
+            matched = sum(1 for word in query_words if word in lowered)
+            ratio = round(matched / len(query_words), 4) if query_words else 0.0
+            if ratio <= 0.0 and have_cards:
+                # Cards answered the query; raw noise adds nothing.
+                continue
+            items.append({
+                "id": f"pending:{session_id}",
+                "content": content,
+                "score": ratio,
+            })
+        items.sort(key=lambda item: item["score"], reverse=True)
+        return items[:slots]

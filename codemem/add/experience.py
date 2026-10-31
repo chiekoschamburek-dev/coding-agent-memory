@@ -1,7 +1,9 @@
-'''Session-scoped experience cards and versioned representations.
+'''Session-scoped experience cards: card-v4 packets and card-v5-minimal.
 
-Legacy repair cards use problem/locate/implement plus deterministic packets;
-their own field evidence, never a session-final patch/test run, bounds facts.
+Two formats share persistence and retrieval interfaces without conversion:
+card-v4 is the legacy repair packet (problem/locate/implement + deterministic
+patch/verify), card-v5-minimal is the idea-level problem/mechanism/verify card.
+No other card format is read or produced.
 '''
 
 from __future__ import annotations
@@ -10,6 +12,23 @@ import re
 from dataclasses import dataclass, replace
 from typing import Sequence
 
+from .minimal import (
+    PAYLOAD_VERSION as MINIMAL_PAYLOAD_VERSION,
+)
+from .minimal import (
+    SYSTEM_PROMPT as MINIMAL_SYSTEM_PROMPT,
+)
+from .minimal import (
+    MAX_MECHANISM_CHARS,
+    MAX_PROBLEM_CHARS,
+    VerifySemantics,
+    admission_problems as minimal_admission_problems,
+    build_evidence as build_minimal_evidence,
+    build_prompt as build_minimal_prompt,
+    is_minimal,
+    prepare_minimal,
+    render_minimal,
+)
 from ..common.casebook import (
     CASE_PAYLOAD_VERSION,
     CONDITION_TYPES,
@@ -23,12 +42,9 @@ from ..common.store import ChunkRecord, StoredChunk, tokenize
 
 EXTRACTION_VERSION_DEFAULT = 'card-v4'
 
-# The narrative fields injected to the answer model, plus the understanding
-# face added in card-v2.  ``problem`` is the retrieval face (issue vocabulary,
-# symptoms, trigger conditions) and the only narrative field that feeds the
-# lexical index; ``mechanism`` is the post-hoc understanding face -- rendered
-# to the model, never indexed.  conditions/verify/files/symbols/patch stay
-# storage/audit-only in v2 and do not enter the answer render.
+# card-v4 narrative fields.  ``problem`` is the retrieval face; ``locate`` and
+# ``implement`` are rendered as the repair packet.  Structure
+# (conditions/verify/files/symbols/patch) stays packet/audit material.
 _CARD_FIELDS = ('problem', 'locate', 'implement')
 _VALID_KINDS = frozenset({'debug', 'feature'})
 _KIND_ALIASES = {
@@ -45,6 +61,11 @@ _DEBUG_CUES = (
     'error', 'exception', 'traceback', 'bug', 'fix', 'broken', 'crash',
     'regression', 'fails', 'failing', 'wrong', '报错', '异常', '修复', '失败',
 )
+
+
+def _card_is_minimal(card: object) -> bool:
+    """Duck-typed form check; legacy packet cards carry no ``is_minimal``."""
+    return is_minimal(getattr(card, "extraction_version", ""))
 
 
 def normalize_kind(value: object) -> str | None:
@@ -88,7 +109,7 @@ def infer_kind(*texts: object) -> str:
 
 @dataclass(frozen=True)
 class ExperienceCard:
-    '''Versioned card: legacy repair packet.'''
+    '''card-v4 repair packet or card-v5-minimal idea-level card.'''
 
     experience_id: str
     user_id: str
@@ -118,12 +139,31 @@ class ExperienceCard:
     verify: VerifyRecipe | None = None
     pitfalls: tuple[str, ...] = ()
 
+    # card-v5-minimal: idea-level acceptance semantics.  Never a command and
+    # never a historical action; the legacy ``verify`` recipe is left unused.
+    verify_semantics: VerifySemantics | None = None
+    # card-v5-minimal provenance: "summary" (the closing summary carried the
+    # mechanism) or "reconstructed" (no-summary fallback, mechanism derived
+    # from the final fix diff).
+    mechanism_source: str = 'summary'
+
+    @property
+    def is_minimal(self) -> bool:
+        return is_minimal(self.extraction_version)
+
     @property
     def stable_id(self) -> str:
         return f'experience:{self.experience_id}'
 
     @property
     def has_narrative_fields(self) -> bool:
+        if self.is_minimal:
+            return bool(
+                self.problem
+                and self.mechanism
+                and self.verify_semantics is not None
+                and not self.verify_semantics.is_empty()
+            )
         return any(isinstance(getattr(self, name), str) and getattr(self, name).strip()
                    for name in _CARD_FIELDS)
 
@@ -146,6 +186,14 @@ def _clean_text(value: object) -> str | None:
     return value[:MAX_FIELD_CHARS] or None
 
 
+def _bounded_text(value: object, limit: int) -> str | None:
+    """Reject, never truncate, for the idea-level card fields."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if 0 < len(value) <= limit else None
+
+
 def _clip_text(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -153,6 +201,17 @@ def _clip_text(value: object) -> str | None:
 
 
 def card_to_payload(card: ExperienceCard) -> dict:
+    if card.is_minimal:
+        return {
+            'payload_version': MINIMAL_PAYLOAD_VERSION,
+            'experience_id': card.experience_id, 'user_id': card.user_id,
+            'session_id': card.session_id, 'kind': card.kind,
+            'extraction_version': card.extraction_version, 'created_at': card.created_at,
+            'problem': card.problem, 'mechanism': card.mechanism,
+            'verify': card.verify_semantics.to_dict() if card.verify_semantics else {},
+            'mechanism_source': card.mechanism_source or 'summary',
+            'source_chunk_ids': list(card.source_chunk_ids),
+        }
     payload = {
         'experience_id': card.experience_id,
         'user_id': card.user_id,
@@ -198,6 +257,19 @@ def card_from_payload(raw: dict) -> ExperienceCard:
     if not isinstance(source_ids, list):
         source_ids = []
     source_ids = tuple(value for value in source_ids if isinstance(value, str) and value)
+    if is_minimal(raw.get('extraction_version')) or raw.get('payload_version') == MINIMAL_PAYLOAD_VERSION:
+        return ExperienceCard(
+            experience_id=str(raw.get('experience_id', '')),
+            user_id=str(raw.get('user_id', '')), session_id=str(raw.get('session_id', '')),
+            kind=normalize_kind(raw.get('kind')) or 'debug',
+            extraction_version='card-v5-minimal',
+            created_at=str(raw.get('created_at', '')),
+            problem=_bounded_text(raw.get('problem'), MAX_PROBLEM_CHARS),
+            mechanism=_bounded_text(raw.get('mechanism'), MAX_MECHANISM_CHARS),
+            verify_semantics=VerifySemantics.from_dict(raw.get('verify')),
+            mechanism_source=str(raw.get('mechanism_source') or 'summary'),
+            source_chunk_ids=source_ids,
+        )
     fields = {name: _clean_text(raw.get(name)) for name in _CARD_FIELDS}
     mechanism = _clean_text(raw.get('mechanism'))
     spec = {name: _clean_text(raw.get(name))
@@ -218,7 +290,10 @@ def card_from_payload(raw: dict) -> ExperienceCard:
         user_id=str(raw.get('user_id', '')),
         session_id=str(raw.get('session_id', '')),
         kind=normalize_kind(raw.get('kind')) or 'debug',
-        extraction_version=str(raw.get('extraction_version', EXTRACTION_VERSION_DEFAULT)),
+        # Only two formats exist.  Any older payload label is read as the
+        # card-v4 packet shape; a payload without v4 fields simply produces an
+        # empty, unrenderable card.
+        extraction_version=EXTRACTION_VERSION_DEFAULT,
         created_at=str(raw.get('created_at', '')),
         problem=fields['problem'],
         mechanism=mechanism,
@@ -322,7 +397,7 @@ def _implement_evidence_digest(window: Sequence[StoredChunk],
 
 
 def extraction_system_prompt(version: str) -> str:
-    return _SYSTEM_PROMPT
+    return MINIMAL_SYSTEM_PROMPT if is_minimal(version) else _SYSTEM_PROMPT
 
 
 def build_extraction_prompt(
@@ -332,6 +407,8 @@ def build_extraction_prompt(
     max_cards: int = 3,
     extraction_version: str = EXTRACTION_VERSION_DEFAULT,
 ) -> str:
+    if is_minimal(extraction_version):
+        return build_minimal_prompt(build_minimal_evidence(window), max_cards)
     parts = [
         '修复案例 schema v2（字段可为空，没有依据就留空；所有字段内容用英文，逐字引用除外；每个事实只放一处）：',
         'kind: "debug"（缺陷/报错/回归）或 "feature"（新能力/接口/增强）',
@@ -383,8 +460,6 @@ _NARRATIVE_SYMBOL_RE = re.compile(
     r'[A-Za-z_][A-Za-z0-9_]{1,}(?:\.[A-Za-z_][A-Za-z0-9_]{1,})+'
     r'|[A-Z][A-Za-z0-9]*(?:Error|Exception|Warning|Fault)'
 )
-
-
 def _strip_ungrounded_anchors(text: str | None, source_text: str) -> str | None:
     """Narrative is not a grounding backdoor: a path or qualified symbol the
     model writes into problem/locate must occur in the cited chunks, or it is
@@ -443,6 +518,29 @@ def _pitfall_grounded(pitfall: str, source_text: str) -> bool:
     return any(token in source_text for token in tokens)
 
 
+def card_admission_problems(
+    proposed: list,
+    *,
+    chunks_by_id: dict,
+    user_id: str,
+    session_id: str,
+) -> list[str]:
+    """Labeled rejection reasons for the minimal repair feedback."""
+    problems: list[str] = []
+    chunks = list(chunks_by_id.values())
+    for i, raw_card in enumerate(proposed[:4], 1):
+        if not isinstance(raw_card, dict):
+            problems.append(f"card{i}: 不是 JSON 对象")
+            continue
+        errs = minimal_admission_problems(
+            raw_card, chunks, user_id=user_id, session_id=session_id)
+        if errs:
+            problems.append(f"card{i}: " + "；".join(errs[:3]))
+    if not problems:
+        problems.append("上一轮的 card 没有通过程序化准入")
+    return problems
+
+
 def _new_card_from_raw(
     raw_card: dict,
     *,
@@ -453,7 +551,27 @@ def _new_card_from_raw(
     extraction_version: str,
     created_at: str,
     grounding_chunks_by_id: dict[str, StoredChunk] | None = None,
+    mechanism_source: str = 'summary',
 ) -> ExperienceCard | None:
+    if is_minimal(extraction_version):
+        # The minimal contract has its own curated evidence window; never let
+        # a caller's wider grounding pool (used by legacy narrative fields)
+        # become the card's provenance or identifier universe.
+        evidence_chunks = list(chunks_by_id.values())
+        prepared = prepare_minimal(raw_card, evidence_chunks,
+                                   user_id=user_id, session_id=session_id,
+                                   mechanism_source=mechanism_source)[0]
+        if prepared is None:
+            return None
+        return ExperienceCard(
+            experience_id=experience_id, user_id=user_id, session_id=session_id,
+            kind=resolve_kind(raw_card.get('kind'), prepared.problem, prepared.mechanism),
+            extraction_version=extraction_version, created_at=created_at,
+            problem=prepared.problem, mechanism=prepared.mechanism,
+            verify_semantics=prepared.verify,
+            mechanism_source=prepared.mechanism_source,
+            source_chunk_ids=prepared.source_chunk_ids,
+        )
     fields = {name: _clean_text(raw_card.get(name)) for name in _CARD_FIELDS}
     spec = {name: _clean_text(raw_card.get(name))
             for name in ('implement_shape', 'implement_boundaries',
@@ -589,6 +707,9 @@ def enrich_card(card: ExperienceCard, chunks: Sequence[StoredChunk]) -> Experien
     diff, symbols and the verification recipe are extracted mechanically so
     the packet stays self-contained even when the model omits them.
     """
+    if _card_is_minimal(card):
+        # An idea-level card deliberately has no packet structure.
+        return card
     packet = build_packet(card, chunks)
     return replace(
         card,
@@ -612,6 +733,7 @@ def build_cards(
     created_at: str,
     max_cards: int,
     grounding_chunks_by_id: dict[str, StoredChunk] | None = None,
+    mechanism_source: str = 'summary',
 ) -> list[ExperienceCard]:
     if not isinstance(raw, dict) or not isinstance(raw.get('cards'), list):
         return []
@@ -628,6 +750,7 @@ def build_cards(
             extraction_version=extraction_version,
             created_at=created_at,
             grounding_chunks_by_id=grounding_chunks_by_id,
+            mechanism_source=mechanism_source,
         )
         if card is not None:
             cards.append(card)
@@ -659,7 +782,7 @@ def _join_field_parts(parts: Sequence[object]) -> str:
 
 
 def card_field_texts(card: ExperienceCard) -> dict[str, str]:
-    """The index face: field-aware repair facts.
+    """The index face: three idea-level faces or field-aware repair facts.
 
     A case packet has narrative *and* machine-extracted structure, and the
     narrative fields are populated too, so the two shapes cannot be an either/or
@@ -674,6 +797,15 @@ def card_field_texts(card: ExperienceCard) -> dict[str, str]:
     error literal on problem, a path or symbol on locate, a test node on test
     (``Store.experience_field_search``).
     """
+    if _card_is_minimal(card):
+        return {
+            'problem': getattr(card, 'problem', '') or '',
+            'mechanism': getattr(card, 'mechanism', '') or '',
+            'locate': '',
+            'implement': '',
+            'test': (card.verify_semantics.index_text()
+                     if getattr(card, 'verify_semantics', None) else ''),
+        }
     conditions = list(card.conditions or ())
     verify = card.verify
     test_parts: list[object] = [
@@ -708,6 +840,8 @@ def card_field_terms(card: ExperienceCard) -> list[str]:
 
 
 def card_lexical_text(card: ExperienceCard) -> str:
+    if _card_is_minimal(card):
+        return getattr(card, 'problem', '') or ''
     return '\n'.join(
         value for value in (card.problem, card.locate, card.implement) if value
     )
@@ -719,11 +853,17 @@ def card_retrieval_text(card: ExperienceCard) -> str:
 
 
 def card_entities(card: ExperienceCard, chunks_by_id: dict[str, StoredChunk]) -> list[tuple[str, str]]:
-    text = card_lexical_text(card)
-    for chunk_id in card.source_chunk_ids:
-        chunk = chunks_by_id.get(chunk_id)
-        if chunk is not None:
-            text += '\n' + chunk.text
+    if _card_is_minimal(card):
+        # Only the three card faces are in the index.  Pulling symbols from the
+        # session timeline here would re-import the historical action and make
+        # a fix-specific identifier a retrieval cue again.
+        text = '\n'.join(value for value in card_field_texts(card).values() if value)
+    else:
+        text = card_lexical_text(card)
+        for chunk_id in card.source_chunk_ids:
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is not None:
+                text += '\n' + chunk.text
     from ..common.chunking import extract_entities
     entities = extract_entities([
         ChunkRecord(
@@ -742,41 +882,6 @@ def card_entities(card: ExperienceCard, chunks_by_id: dict[str, StoredChunk]) ->
     return [(item.kind, item.value) for item in entities]
 
 
-def scope_footprint(card: ExperienceCard, max_chars: int = 400) -> str:
-    """One-line scope prior derived mechanically from the stored patch.
-
-    Under the official tests-hidden protocol the issue text under-specifies
-    how far a fix must reach; the historical patch is the only in-memory
-    carrier of that scope.  Files, the functions each hunk lands in (from
-    the @@ context line) and the magnitude, parsed from the diff -- no model
-    output, grounded by construction.
-    """
-    patch = card.patch or ""
-    if not patch.strip():
-        return ""
-    files = sorted(set(re.findall(r"^diff --git a/(\S+)", patch, re.M)))
-    funcs = []
-    for ctx in re.findall(r"^@@.*?@@\s*(.*)$", patch, re.M):
-        ctx = (ctx or "").strip()
-        m = re.search(r"def\s+(\w+)|class\s+(\w+)|(\w+)", ctx)
-        if m:
-            token = next(g for g in m.groups() if g)
-            if token not in funcs:
-                funcs.append(token)
-        if len(funcs) >= 4:
-            break
-    added = len(re.findall(r"^\+(?!\+)", patch, re.M))
-    removed = len(re.findall(r"^-(?!-)", patch, re.M))
-    parts = []
-    if files:
-        parts.append("文件 " + ", ".join(f.split("/")[-1] for f in files[:3]))
-    if funcs:
-        parts.append("触及 " + ", ".join(funcs))
-    parts.append(f"约 +{added}/-{removed} 行")
-    line = "范围足迹（历史同类修复的改动范围先验）：" + "；".join(parts)
-    return line[:max_chars]
-
-
 def render_experience(
     card: ExperienceCard,
     chunks_by_id: dict[str, StoredChunk],
@@ -785,60 +890,22 @@ def render_experience(
     quote_max_chars: int,
     allow_patch: bool = True,
     evidence: Sequence[str] = (),
-    first_action_hint: str = "",
     patch_render: str = "before_after",
     include_chunk_provenance: bool = True,
     persisted: bool = False,
-    mode: str = "packet",
 ) -> str:
-    # card-v2 abstract mode: only the three narrative fields plus the
-    # mechanism face enter the model context -- no packet structure, no chunk
-    # excerpts.  The retrieval face stays ``problem``; grounding was applied
-    # at extraction time, so nothing here dereferences beyond the card.
-    if mode in ("abstract", "abstract_scope"):
-        lines = ['[历史经验卡]']
-        if first_action_hint:
-            lines.append(first_action_hint)
-        faces = (
-            ('问题（症状/触发）', card.problem),
-            ('机制（根因/确认）', card.mechanism),
-        )
-        if mode == "abstract":
-            faces += (('定位要点', card.locate),)
-        # card-v4: the implement spec replaces the historical narrative when
-        # present -- shape/boundaries/acceptance answer what a strong model
-        # cannot derive from the pre-fix repo
-        spec_faces = (
-            ('修复形态', getattr(card, 'implement_shape', None)),
-            ('边界分片', getattr(card, 'implement_boundaries', None)),
-            ('验收语义', getattr(card, 'implement_acceptance', None)),
-        )
-        if any(v for _, v in spec_faces):
-            faces += spec_faces
-        else:
-            faces += (('修改策略', card.implement),)
-        for label, value in faces:
-            if value:
-                lines.append(f'{label}：{value}')
-        if mode == "abstract_scope":
-            footprint = scope_footprint(card)
-            if footprint:
-                lines.append(footprint)
-        return counter.truncate('\n'.join(lines), max_tokens)
-    # Payload v2: a self-contained case packet.  The renderer never depends on
-    # the reader being able to dereference a chunk id, because the API only
-    # exposes ``content``.
+    if _card_is_minimal(card):
+        return render_minimal(card, counter, max_tokens)
+    # card-v4: a self-contained case packet.  The renderer never depends on the
+    # reader being able to dereference a chunk id, because the API only exposes
+    # ``content``.
     if card.has_packet_fields:
         packet = build_packet(card, list(chunks_by_id.values()), allow_patch=allow_patch,
                               persisted=persisted)
-        body = render_packet(packet, counter, max_tokens, evidence=evidence,
-                             allow_patch=allow_patch, first_action_hint=first_action_hint,
+        return render_packet(packet, counter, max_tokens, evidence=evidence,
+                             allow_patch=allow_patch,
                              patch_render=patch_render,
                              include_chunk_provenance=include_chunk_provenance)
-        footprint = scope_footprint(card)
-        if footprint:
-            body = f"{footprint}\n{body}"
-        return body
     lines = ['[历史经验卡]', f'来源：session {card.session_id} · {card.stable_id}', '', '【历史经验】']
     labels = {'problem': 'problem', 'locate': 'locate', 'implement': 'implement'}
     for name in _CARD_FIELDS:
@@ -864,6 +931,11 @@ def render_experience(
 
 def card_anchors(card: ExperienceCard) -> list[tuple[str, str]]:
     """Structural anchors for the case index: files, symbols, conditions."""
+    if _card_is_minimal(card):
+        kinds = {'path': 'file', 'symbol': 'symbol', 'error': 'error',
+                 'config_key': 'config', 'test_name': 'test_name'}
+        return list(dict.fromkeys((kinds[kind], value) for kind, value in card_entities(card, {})
+                                  if kind in kinds))
     anchors: list[tuple[str, str]] = []
     for path in card.files:
         anchors.append(("file", path.lower()))

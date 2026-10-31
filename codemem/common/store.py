@@ -26,7 +26,6 @@ worth more here than FTS5's raw speed on a corpus of this size.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import sqlite3
 import threading
@@ -137,7 +136,7 @@ def _digest(*parts: object) -> str:
     return hasher.hexdigest()
 
 
-def content_hash(messages: Sequence["MessageInput"]) -> str:
+def content_hash(messages: Sequence[MessageInput]) -> str:
     """Hash of the normalised request body.
 
     Order and exact string content both matter, so they are hashed directly
@@ -997,6 +996,7 @@ class Store:
             "problem": self.settings.card_field_weight_problem,
             "locate": self.settings.card_field_weight_locate,
             "implement": self.settings.card_field_weight_implement,
+            "mechanism": self.settings.card_field_weight_mechanism,
             "test": self.settings.card_field_weight_test,
         }
         weights: dict[str, float] = {}

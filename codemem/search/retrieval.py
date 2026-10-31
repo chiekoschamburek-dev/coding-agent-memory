@@ -24,94 +24,22 @@ from __future__ import annotations
 import json
 import math
 import re
-import shlex
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ..common.config import Settings, get_settings
 from .applicability import (
     ApplicabilityJudge,
     NullApplicabilityJudge,
     fuse_with_applicability,
 )
 from ..common.casebook import CasePacket, build_packet
-from ..add.experience import ExperienceCard, card_from_payload, render_experience
+from ..common.config import Settings, get_settings
+from ..add.experience import card_from_payload, render_experience
 from .query import QueryFeatures, build_query_features
 from .rerank import NullReranker, Reranker
 from ..common.store import Store
 from ..common.tokens import TokenCounter, get_counter
-
-# --------------------------------------------------------------------------
-# read-only verification hint
-# --------------------------------------------------------------------------
-
-_GENERIC_CODE_ANCHORS = {
-    "self", "array", "dtype", "data", "value", "values", "test", "method",
-    "function", "object", "none", "true", "false", "pandas", "dataframe",
-    "float32", "float64", "int", "string", "class", "type",
-}
-
-
-def _is_code_anchor(token: str) -> bool:
-    low = token.lower()
-    if len(token) < 3 or low in _GENERIC_CODE_ANCHORS:
-        return False
-    if low.startswith("test_") or "=" in token:
-        return False
-    return bool(re.search(r"[A-Za-z]", token))
-
-
-def _specific_code_anchor(text: str | None) -> str | None:
-    if not text:
-        return None
-    for raw in re.findall(r"`([^`]+)`", text):
-        token = re.sub(r"\(.*$", "", raw).strip().strip(".,:;()[]{}'\"")
-        if _is_code_anchor(token):
-            return token
-    for token in re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", text):
-        if _is_code_anchor(token):
-            return token
-    for token in re.findall(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", text):
-        if _is_code_anchor(token):
-            return token
-    return None
-
-
-def _first_action_hint(card: ExperienceCard, features: QueryFeatures) -> str:
-    """Existing-tests probe derived from the card's file anchor.
-
-    Measured on the pilot trajectories, locating is free (the issue traceback
-    already names the file; median first touch = call 2) and what fails is
-    implement semantics -- what the fix must return and how far it must
-    reach.  The module's existing tests are the only officially visible
-    carrier of those semantics, so the hint points there first: they are the
-    (A)-axis semantics source and the (B)-axis guardrail when the fix scope
-    expands.  No evaluator-side data is named.
-    """
-    files = [str(f).strip() for f in (getattr(card, "files", ()) or ()) if str(f).strip()]
-    if not files:
-        return ""
-    stem = files[0].replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    probe = (
-        f"T=$(find . -name 'test_{stem}*.py' -not -path '*/node_modules/*' | head -1); "
-        f'echo "tests: $T"; '
-        f'[ -n "$T" ] && sed -n "1,120p" "$T"'
-    )
-    run = (
-        f"T=$(find . -name 'test_{stem}*.py' -not -path '*/node_modules/*' | head -1); "
-        f'[ -n "$T" ] && python -m pytest "$T" -q 2>&1 | tail -15'
-    )
-    return "\n".join(
-        [
-            "先读并运行本模块的存量测试再动手（历史经验提示）：",
-            "存量测试定义了正确语义，也是改动范围的护栏；先看断言在检查什么：",
-            probe,
-            "然后跑一次确认现状：",
-            run,
-            "历史线索可能与当前 issue 不同；若测试语义与 issue 冲突，以 issue 为准。",
-        ]
-    )
-
+from .transferability import TransferCard, transferability_hint
 
 # --------------------------------------------------------------------------
 # result model
@@ -156,7 +84,7 @@ class StoreExperienceVectorIndex:
     embedded.
     """
 
-    def __init__(self, store: "Store", embedder, model: str, timeout_s: float | None = None) -> None:
+    def __init__(self, store: Store, embedder, model: str, timeout_s: float | None = None) -> None:
         self.store = store
         self.embedder = embedder
         self.model = model
@@ -253,6 +181,7 @@ class SearchEngine:
         judge: ApplicabilityJudge | None = None,
         reranker: Reranker | None = None,
         card_vector_index: ExperienceVectorIndex | None = None,
+        transferability_judge=None,
     ) -> None:
         self.store = store
         self.settings = settings or get_settings()
@@ -260,6 +189,7 @@ class SearchEngine:
         self.counter = token_counter or get_counter(self.settings)
         self.judge = judge or NullApplicabilityJudge()
         self.reranker = reranker or NullReranker()
+        self.transferability_judge = transferability_judge
 
     # -- public ----------------------------------------------------------
 
@@ -291,10 +221,16 @@ class SearchEngine:
         diagnostics.after_dedup = len(ordered)
 
         selected = self._select(ordered, diagnostics, response_limit)
-        selected = self._apply_applicability(
-            selected, features, diagnostics, deadline
-        )
-        selected = self._apply_rerank(selected, features, diagnostics, deadline)
+        if self.settings.transferability_enabled:
+            selected = self._apply_transferability(
+                selected, features, diagnostics, deadline, user_id=user_id,
+            )
+            diagnostics.rerank = {"applied": False, "reason": "replaced_by_transferability"}
+        else:
+            selected = self._apply_applicability(
+                selected, features, diagnostics, deadline
+            )
+            selected = self._apply_rerank(selected, features, diagnostics, deadline)
         selected = self._finalize(selected, diagnostics, response_limit)
 
         # Final output stage. Two distinct budgets apply, and conflating them is
@@ -338,7 +274,11 @@ class SearchEngine:
 
         for rank, candidate in enumerate(selected, start=1):
             card = (candidate.payload or {}).get("card")
-            if emitted >= min_items and candidate.fused_score < floor:
+            is_minimal = bool(card and card.is_minimal)
+            # An idea-level card is not a repair packet padded into the
+            # response: it must earn its slot over the same floor.  The
+            # min-output guarantee stays for legacy packet cards.
+            if (is_minimal or emitted >= min_items) and candidate.fused_score < floor:
                 diagnostics.dropped_low_score += 1
                 continue
             remaining = hard_cap - accumulated_tokens
@@ -362,11 +302,10 @@ class SearchEngine:
             allow_patch = _patch_allowed(candidate, features)
             if not allow_patch:
                 diagnostics.patch_suppressed += 1
-            evidence = self._card_evidence(
+            evidence = () if is_minimal else self._card_evidence(
                 candidate.payload["card"], features,
                 k=self.settings.card_evidence_items,
             )
-            first_action_hint = _first_action_hint(candidate.payload["card"], features)
             content = render_experience(
                 candidate.payload["card"],
                 candidate.payload.get("chunks_by_id", {}),
@@ -375,7 +314,6 @@ class SearchEngine:
                 self.settings.experience_quote_max_chars,
                 allow_patch=allow_patch,
                 evidence=evidence,
-                first_action_hint=first_action_hint,
                 patch_render=self.settings.experience_patch_render,
                 include_chunk_provenance=False,
                 persisted=True,
@@ -409,6 +347,10 @@ class SearchEngine:
                 "content": content,
                 "score": score,
             }
+            # Grouped order and RRF scores are different signals. The optional
+            # score must not contradict the judge's final response order.
+            if diagnostics.applicability.get("mode") == "transferability" and diagnostics.applicability.get("applied"):
+                entry.pop("score")
             created_at = candidate.payload.get("created_at")
             if created_at:
                 entry["created_at"] = created_at
@@ -605,7 +547,7 @@ class SearchEngine:
         query_tokens = {token.lower() for token in getattr(features, "tokens", ()) if token}
         anchors = [
             str(value).lower()
-            for value in getattr(features, "anchor_values", lambda: [])()
+            for value in getattr(features, "anchor_values", list)()
             if str(value).strip()
         ]
         # Evidence must be executable/test evidence, not the issue prose.  The
@@ -705,6 +647,8 @@ class SearchEngine:
         if final_limit <= 0:
             return []
         limit = final_limit
+        if self.settings.transferability_enabled:
+            limit = max(limit, self.settings.transferability_max_candidates)
         if getattr(self.judge, "available", False):
             limit = max(limit, self.settings.applicability_max_candidates)
         if getattr(self.reranker, "available", False):
@@ -844,6 +788,54 @@ class SearchEngine:
 
     # -- applicability ----------------------------------------------------
 
+    def _apply_transferability(self, selected, features, diagnostics, deadline, *, user_id):
+        judge = self.transferability_judge
+        info = {"mode": "transferability", "applied": False}
+        diagnostics.applicability = info
+        if self.settings.transferability_max_candidates <= 0:
+            info["reason"] = "no_candidates"
+            return selected
+        if judge is None or not judge.available:
+            info["reason"] = "unavailable"
+            diagnostics.degraded.append("transferability_unavailable")
+            return selected
+        cards = []
+        for candidate in selected:
+            card = (candidate.payload or {}).get("card")
+            if card is not None and card.is_minimal:
+                cards.append(TransferCard(candidate.item_id, card.problem, card.mechanism))
+            if len(cards) >= max(0, self.settings.transferability_max_candidates):
+                break
+        try:
+            result = judge.judge(user_id=user_id, query=features.raw_query,
+                                 cards=cards, deadline=deadline)
+        except Exception:
+            info["reason"] = "error"
+            diagnostics.degraded.append("transferability_failed")
+            return selected
+        info.update({"applied": bool(result.verdicts), "reason": result.reason,
+                     "calls": result.calls, "cached": result.cached,
+                     "hypotheses": len(result.hypotheses), "candidates": len(cards)})
+        if not result.verdicts:
+            if cards:
+                diagnostics.degraded.append("transferability_failed")
+            return selected
+        hypotheses = {h["id"]: h for h in result.hypotheses}
+        counts = {}
+        for candidate in selected:
+            verdict = result.verdicts.get(candidate.item_id)
+            if verdict is not None:
+                value = dict(vars(verdict))
+                value["hypothesis"] = hypotheses.get(verdict.matched_hypothesis)
+                candidate.payload["transferability"] = value
+                counts[verdict.verdict] = counts.get(verdict.verdict, 0) + 1
+        info["verdicts"] = counts
+        # Stable grouping, not filtering. Unjudged/unknown/topic-related cards
+        # keep baseline order between transferable and irrelevant cards.
+        group = {"transferable": 0, "irrelevant": 2}
+        return sorted(selected, key=lambda c: group.get(
+            (c.payload or {}).get("transferability", {}).get("verdict"), 1))
+
     def _apply_applicability(
         self,
         selected: list[Candidate],
@@ -868,6 +860,9 @@ class SearchEngine:
                 continue
             payload = candidate.payload or {}
             card = payload.get("card")
+            if card is not None and card.is_minimal:
+                # An idea-level card has no repair packet for the legacy judge.
+                continue
             packet = payload.get("packet")
             if packet is None:
                 card = payload.get("card")
@@ -999,6 +994,9 @@ def _applicability_hint(candidate: Candidate) -> str:
     The hint is content, so its token cost is reserved before rendering; it is
     never appended after the per-item cap has already been filled.
     """
+    transfer_hint = transferability_hint(candidate.payload or {})
+    if transfer_hint:
+        return transfer_hint
     verdict = (candidate.payload or {}).get("applicability")
     if (
         candidate.kind == "experience"

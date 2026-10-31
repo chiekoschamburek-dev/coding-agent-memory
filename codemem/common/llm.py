@@ -122,6 +122,7 @@ class LLMClient:
         user: str,
         max_tokens: int = 1024,
         timeout_s: float | None = None,
+        max_retries: int | None = None,
     ) -> tuple[dict | list | None, LLMResult]:
         """Ask for JSON and parse it defensively.
 
@@ -130,6 +131,8 @@ class LLMClient:
         dropped, not retried into the budget.
         """
         client = self._ensure_client()
+        if max_retries is not None:
+            client = client.with_options(max_retries=max_retries)
         started = time.monotonic()
         try:
             response = client.chat.completions.create(

@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_dotenv(path: Path) -> None:
@@ -125,7 +125,14 @@ class Settings:
     embed_budget_s: float = field(default_factory=lambda: _env_float("CODEMEM_EMBED_BUDGET_S", 8.0))
     embed_batch_size: int = field(default_factory=lambda: _env_int("CODEMEM_EMBED_BATCH_SIZE", 10))
     embed_cache_path: Path = field(
-        default_factory=lambda: Path(_env_str("CODEMEM_EMBED_CACHE_PATH", str(REPO_ROOT / "datasets" / "swecontextbench" / "cache" / "embeddings.jsonl")))
+        default_factory=lambda: Path(_env_str(
+            "CODEMEM_EMBED_CACHE_PATH",
+            str(REPO_ROOT / "data" / "cache" / "embeddings.jsonl"),
+        ))
+    )
+    # Byte-bounded LRU; SQLite is the persistent cache. Zero disables the LRU.
+    embed_cache_memory_mb: int = field(
+        default_factory=lambda: _env_int("CODEMEM_EMBED_CACHE_MEMORY_MB", 16)
     )
     # Concurrency bound on model calls (FIXES.md P1.2). The service runs in a
     # threadpool, so unbounded model work would occupy every worker and starve
@@ -169,9 +176,9 @@ class Settings:
     # --- retrieval (plan.md section 6.2) -----------------------------------
     top_k_max: int = field(default_factory=lambda: _env_int("CODEMEM_TOP_K_MAX", 100))
     # The answer model is a tool-using agent: it has ~5 reads and 6 test runs.
-    # Five self-contained items is the response budget; top_k remains the
-    # contract upper bound, but precision beats volume.
-    search_max_items: int = field(default_factory=lambda: _env_int("CODEMEM_SEARCH_MAX_ITEMS", 5))
+    # Honour the platform's top_k ceiling without an additional ten-card cap.
+    # Admission and content budgets still determine how many items qualify.
+    search_max_items: int = field(default_factory=lambda: _env_int("CODEMEM_SEARCH_MAX_ITEMS", 100))
     # Candidates handed to the cross-encoder before the final cut: recall 20,
     # rerank all 20, then the floor + final response cut.
     rerank_candidates: int = field(default_factory=lambda: _env_int("CODEMEM_RERANK_CANDIDATES", 20))
@@ -216,6 +223,9 @@ class Settings:
     card_field_weight_problem: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_W_PROBLEM", 1.0))
     card_field_weight_locate: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_W_LOCATE", 1.0))
     card_field_weight_implement: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_W_IMPLEMENT", 0.5))
+    # card-v5-minimal: problem is the primary retrieval face; the mechanism is
+    # a secondary causal-vocabulary face, the acceptance semantics sit in test.
+    card_field_weight_mechanism: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_W_MECHANISM", 0.6))
     card_field_weight_test: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_W_TEST", 0.8))
     card_anchor_field_boost: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_ANCHOR_BOOST", 1.6))
     card_bm25_k1: float = field(default_factory=lambda: _env_float("CODEMEM_CARD_BM25_K1", 1.2))
@@ -237,6 +247,11 @@ class Settings:
     applicability_max_candidates: int = field(default_factory=lambda: _env_int("CODEMEM_APPLICABILITY_MAX_CANDIDATES", 20))
     applicability_max_tokens: int = field(default_factory=lambda: _env_int("CODEMEM_APPLICABILITY_MAX_TOKENS", 900))
     applicability_timeout_s: float = field(default_factory=lambda: _env_float("CODEMEM_APPLICABILITY_TIMEOUT_S", 3.0))
+    # Minimal cards: stable grouping, no judge-driven deletion. Replaces qwen.
+    transferability_enabled: bool = field(default_factory=lambda: _env_bool("CODEMEM_TRANSFERABILITY_ENABLED", False))
+    transferability_max_candidates: int = field(default_factory=lambda: _env_int("CODEMEM_TRANSFERABILITY_MAX_CANDIDATES", 20))
+    transferability_budget_s: float = field(default_factory=lambda: _env_float("CODEMEM_TRANSFERABILITY_BUDGET_S", 60.0))
+    transferability_max_tokens: int = field(default_factory=lambda: _env_int("CODEMEM_TRANSFERABILITY_MAX_TOKENS", 4000))
 
     # --- experience cards (per-session extraction) --------------------------
     # Cards are extracted once per session, after the session is fully added
@@ -252,9 +267,16 @@ class Settings:
     # larger sessions are extracted in batches, bounded by the per-finalisation
     # model-call budget.
     experience_session_max_chunks: int = field(default_factory=lambda: _env_int("CODEMEM_EXPERIENCE_SESSION_MAX_CHUNKS", 600))
-    # Card extraction version recorded on every card payload.
+    # card-v4 or card-v5-minimal. Use a separate DB/library per version.
     experience_extraction_version: str = field(
         default_factory=lambda: _env_str("CODEMEM_EXPERIENCE_EXTRACTION_VERSION", "card-v4")
+    )
+    # card-v5-minimal no-summary fallback: when a session has no closing
+    # summary, rebuild the extraction window around the final fix diff and
+    # reconstruct the mechanism from it (explain-the-fix). Off = sessions
+    # without a summary are skipped as before ("no_issue_or_summary").
+    minimal_summary_fallback: bool = field(
+        default_factory=lambda: _env_bool("CODEMEM_MINIMAL_SUMMARY_FALLBACK", True)
     )
     # Per-quote ceiling for evidence embedded inside a card, so one long quote
     # cannot consume the whole item budget.
@@ -264,6 +286,25 @@ class Settings:
     # Hard cap on LLM calls per session finalisation (extraction batches +
     # retries).
     extract_calls_per_finalization: int = field(default_factory=lambda: _env_int("CODEMEM_EXTRACT_CALLS_PER_FINALIZATION", 5))
+    # Per-session budget for the Search backstop finalisation only. The Add
+    # path keeps add_enrich_budget_s; clamping this keeps pending sessions
+    # from stalling platform searches (they stay pending and are retried by
+    # explicit drains instead).
+    search_backstop_budget_s: int = field(default_factory=lambda: _env_int("CODEMEM_SEARCH_BACKSTOP_BUDGET_S", 120))
+    # Contract "success=true means persisted AND immediately retrievable"
+    # (api_guide.md).  Two mechanisms close the gap between the chunk commit
+    # and card extraction:
+    # - finalize_background: Add spawns a daemon thread that extracts cards
+    #   for the just-written session, so cards usually exist before the next
+    #   Search without blocking the Add response.
+    # - search_pending_fallback: Search surfaces still-pending sessions' raw
+    #   chunks as provisional items (lexical-overlap scored), so a Search
+    #   issued immediately after Add always returns the content even when no
+    #   card exists yet.  Cards replace provisional items once extracted.
+    finalize_background: bool = field(default_factory=lambda: _env_bool("CODEMEM_FINALIZE_BACKGROUND", False))
+    search_pending_fallback: bool = field(default_factory=lambda: _env_bool("CODEMEM_SEARCH_PENDING_FALLBACK", False))
+    pending_fallback_max_sessions: int = field(default_factory=lambda: _env_int("CODEMEM_PENDING_FALLBACK_MAX_SESSIONS", 10))
+    pending_fallback_max_chars: int = field(default_factory=lambda: _env_int("CODEMEM_PENDING_FALLBACK_MAX_CHARS", 4000))
 
     # Self-contained packets are budgeted per item; these are hard ceilings that
     # the renderer enforces (see casebook.py).

@@ -1,17 +1,16 @@
-"""Embedding adapter (plan.md section 3, dataset.md §11).
+"""Embedding adapter.
 
-Independently configured from the chat model on purpose: plan.md §2.2 flags
-whether the gpt-4o-mini rule also binds embeddings as *unverified*, so the
-vector channel must be able to exist, fail, or be absent without touching
-retrieval correctness.
+Independently configured from the chat model on purpose: the gpt-4o-mini rule
+binds memory-side LLM work, so the vector channel must be able to exist, fail,
+or be absent without touching retrieval correctness.
 
 Two invariants this module enforces:
 
 * **Never raise into the request path.** Any provider problem returns ``None``;
   the caller degrades to lexical (plan.md §9 stage 1: "向量服务失效不破坏基础
   检索能力").
-* **Cache by (content hash, model, dim).** dataset.md §11 requires this so
-  B0/B1/B2 ablations replaying the same corpus do not re-bill the provider.
+* **Cache by (content hash, model, dim).** Replaying the same corpus does not
+  re-bill the provider.
 
 The cache is content-addressed and stores only vectors, never benchmark text.
 """
@@ -19,7 +18,6 @@ The cache is content-addressed and stores only vectors, never benchmark text.
 from __future__ import annotations
 
 import hashlib
-import json
 import struct
 import threading
 import time
@@ -27,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Settings, get_settings
+from .embedding_cache import EmbeddingCache
 
 EMBEDDING_VERSION = "embed-v1"
 
@@ -121,58 +120,6 @@ def unpack_vector(blob: bytes, dim: int) -> list[float]:
     if len(blob) != dim * 4:
         raise ValueError(f"vector blob is {len(blob)} bytes, expected {dim * 4}")
     return list(struct.unpack(f"<{dim}f", blob))
-
-
-class EmbeddingCache:
-    """On-disk content-addressed cache (dataset.md §11).
-
-    Kept as a single JSONL file keyed by the content hash so ablation reruns
-    are cheap and the cache is trivially inspectable. Vectors are stored as
-    plain lists; the file holds no source text.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._memory: dict[str, list[float]] = {}
-        self._loaded = False
-        self.hits = 0
-        self.misses = 0
-
-    def _load(self) -> None:
-        if self._loaded:
-            return
-        self._loaded = True
-        if not self.path.exists():
-            return
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-                self._memory[row["k"]] = row["v"]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                continue
-
-    def get(self, key: str) -> list[float] | None:
-        self._load()
-        found = self._memory.get(key)
-        if found is None:
-            self.misses += 1
-        else:
-            self.hits += 1
-        return found
-
-    def put(self, key: str, vector: list[float]) -> None:
-        self._load()
-        if key in self._memory:
-            return
-        self._memory[key] = vector
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8", newline="\n") as fh:
-            fh.write(json.dumps({"k": key, "v": vector}, separators=(",", ":")) + "\n")
-
-    def stats(self) -> dict:
-        return {"hits": self.hits, "misses": self.misses, "entries": len(self._memory)}
 
 
 class EmbeddingClient:
@@ -358,8 +305,11 @@ _client: EmbeddingClient | None = None
 def get_embedder(settings: Settings | None = None, cache_path: Path | None = None) -> EmbeddingClient:
     global _client
     if _client is None or settings is not None:
-        cache = EmbeddingCache(cache_path) if cache_path else None
-        _client = EmbeddingClient(settings, cache)
+        cfg = settings or get_settings()
+        cache = EmbeddingCache(
+            cache_path, memory_max_bytes=cfg.embed_cache_memory_mb * 1024 * 1024,
+        ) if cache_path else None
+        _client = EmbeddingClient(cfg, cache)
     return _client
 
 

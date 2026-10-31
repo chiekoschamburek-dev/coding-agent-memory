@@ -1,1 +1,1 @@
-"""Search track: query features, retrieval, rerank, applicability judging."""
+"""Search track: query features, retrieval, rerank and applicability/transferability."""

@@ -42,8 +42,7 @@ class HttpReranker:
       body ``input.{query,documents}``, response ``output.results`` with
       ``relevance_score``; model ``qwen3-rerank``).
     * anything else — the Cohere-style ``POST {base}/rerank`` (body
-      ``{query, documents}``, response ``results`` with ``score``), as served
-      by ``scripts/serve_rerank.py``.
+      ``{query, documents}``, response ``results`` with ``score``).
 
     Both score shapes are accepted on either path and normalised to [0, 1].
     """

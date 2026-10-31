@@ -415,7 +415,7 @@ def format_change_for_agent(patch: str, max_chars: int = 1400) -> str:
     before/after pair with a location label: the model still sees the change,
     but cannot mistake the ``+`` marker for literal code.
 
-    The location is load-bearing.  A tool-loop agent often reads a large file
+    The location is load-bearing.  A tool-using agent often reads a large file
     truncated (head + tail), so a packet that says only "this file" sends it to
     the first plausible edit in the visible region; it must also get the hunk's
     start line or an exact line to search for.
@@ -830,6 +830,10 @@ def build_packet(
     (``experience._new_card_from_raw`` forces patch/verify to None), so the
     fallback cannot let a model-written diff bypass grounding.
     """
+    if _card_attr(card, "extraction_version", "") == "card-v5-minimal":
+        raise ValueError(
+            "card-v5-minimal is an idea-level card, not a repair packet; "
+            "use render_experience")
     problem = _clean(str(_card_attr(card, "problem", "") or ""))
     problem = problem[:MAX_FIELD_CHARS]
     implement = _clean(str(_card_attr(card, "implement", "") or ""))
@@ -1066,7 +1070,7 @@ def _patch_summary(packet: CasePacket) -> str:
 
 def render_packet(packet: CasePacket, counter, max_tokens: int,
                   evidence: Sequence[str] = (), allow_patch: bool = True,
-                  first_action_hint: str = "", patch_render: str = "before_after",
+                  patch_render: str = "before_after",
                   include_chunk_provenance: bool = True) -> str:
     """Render one self-contained packet under a hard token budget.
 
@@ -1078,8 +1082,6 @@ def render_packet(packet: CasePacket, counter, max_tokens: int,
         return ""
 
     core: list[str] = [_header(packet)]
-    if first_action_hint:
-        core.append(first_action_hint)
     if packet.problem:
         if allow_patch:
             core.append(f"问题：{packet.problem}")
