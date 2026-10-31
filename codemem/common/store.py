@@ -428,6 +428,20 @@ class Store:
         """
         with self._write_lock:
             conn = self.conn
+            if conn.in_transaction:
+                # Compose card deletion, index replacement and session status
+                # into one publication. Savepoints preserve inner failures.
+                savepoint = "write_" + uuid.uuid4().hex
+                conn.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    yield conn
+                except BaseException:
+                    conn.execute(f"ROLLBACK TO {savepoint}")
+                    conn.execute(f"RELEASE {savepoint}")
+                    raise
+                else:
+                    conn.execute(f"RELEASE {savepoint}")
+                return
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
@@ -436,6 +450,19 @@ class Store:
                 raise
             else:
                 conn.execute("COMMIT")
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        """One WAL snapshot across recall channels; concurrent writers proceed."""
+        conn = self.conn
+        if conn.in_transaction:
+            yield conn
+            return
+        conn.execute("BEGIN")
+        try:
+            yield conn
+        finally:
+            conn.execute("ROLLBACK")
 
     # -- schema -----------------------------------------------------------
 
@@ -684,6 +711,13 @@ class Store:
         self._stats_cache.clear()
 
     # -- session lifecycle ---------------------------------------------------
+
+    def session_is_extracted(self, user_id: str, session_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT status FROM sessions WHERE user_id=? AND session_id=?",
+            (user_id, session_id),
+        ).fetchone()
+        return row is not None and row["status"] == "extracted"
 
     def pending_sessions(self, user_id: str, exclude_session_id: str | None = None) -> list[str]:
         """Sessions with committed chunks but no completed extraction attempt."""

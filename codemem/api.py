@@ -181,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(
             status_code=503,
             content={"detail": "model backend unavailable", "retryable": True},
+            headers={"Retry-After": "2"},
         )
 
     # -- endpoints -------------------------------------------------------
@@ -211,9 +212,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "event": "add",
                     "user_id": payload.user_id,
                     "request_id": payload.request_id,
+                    "session_id": payload.session_id,
                     "messages": len(payload.messages) if isinstance(payload.messages, list) else 0,
                     "mode": outcome.mode,
                     "dedup": outcome.deduplicated,
+                    "finalization": [s for s in outcome.steps if s.get("name") == "finalize"],
                     "elapsed_ms": outcome.elapsed_ms,
                     "wall_ms": int((time.monotonic() - started) * 1000),
                 }
@@ -297,6 +300,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "guard": get_guard(settings).snapshot(),
             "config": {
                 "add_sync_budget_s": settings.add_sync_budget_s,
+                "add_finalize_sync": settings.add_finalize_sync,
+                "finalize_background": settings.finalize_background and not settings.add_finalize_sync,
+                "search_pending_fallback": settings.search_pending_fallback and not settings.add_finalize_sync,
+                "model_concurrency": settings.model_concurrency,
                 "search_budget_p95_s": settings.search_budget_p95_s,
                 "search_hard_budget_s": settings.search_hard_budget_s,
                 "token_budget_total": settings.token_budget_total,

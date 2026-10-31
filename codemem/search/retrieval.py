@@ -214,7 +214,8 @@ class SearchEngine:
             return [], diagnostics
         response_limit = final_limit
 
-        pool = self._recall_cards(user_id, features, diagnostics)
+        with self.store.read_snapshot():
+            pool = self._recall_cards(user_id, features, diagnostics)
         diagnostics.pool_size = len(pool)
 
         ordered = self._rank(pool, features)
@@ -815,7 +816,8 @@ class SearchEngine:
             return selected
         info.update({"applied": bool(result.verdicts), "reason": result.reason,
                      "calls": result.calls, "cached": result.cached,
-                     "hypotheses": len(result.hypotheses), "candidates": len(cards)})
+                     "hypotheses": len(result.hypotheses), "candidates": len(cards),
+                     "diagnostics": result.diagnostics})
         if not result.verdicts:
             if cards:
                 diagnostics.degraded.append("transferability_failed")

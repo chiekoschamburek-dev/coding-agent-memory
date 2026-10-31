@@ -10,7 +10,7 @@ Source modules are preserved with import-path adaptations and a repository-root
 path adjustment in `common/config.py`. Experiment scripts, datasets, databases
 and credentials are outside this repository's scope.
 
-Incoming messages are chunked losslessly into persisted facts. Closed sessions
+Incoming messages are chunked losslessly into persisted facts. Sessions
 are distilled by `gpt-4o-mini` into experience cards; Search returns ranked
 historical evidence. Raw message bodies are never stored as separate records.
 Cards are preferred; optional pending-session fallback can return persisted
@@ -71,18 +71,27 @@ replace existing cards across a version boundary.
 
 ## Session lifecycle
 
-1. **Add:** validate, reserve the idempotency key, chunk and commit. Success means
-   the chunks and pending session state are persisted.
-2. **Finalise:** an Add with a different `session_id` finalises older pending
-   sessions. Search also finalises pending sessions as a backstop. The session's
-   cards are replaced together, then embedded.
-3. **Failure:** model failures leave the session pending and preserve previous
-   cards. A successful extraction with zero admissible cards marks it extracted.
+Set `CODEMEM_ADD_FINALIZE_SYNC=true` when each Add contains a complete session:
 
-Add, extraction and Search are serialised within each user scope so Search
-cannot observe partial card replacement and newer Adds remain pending.
-Optional background finalisation starts extraction after Add; optional pending
-fallback makes persisted chunk excerpts available before cards exist.
+1. **Add:** validate, reserve the idempotency key, chunk and persist session input.
+2. **Extract:** wait for this session's extraction within its deadline, including
+   time spent waiting for a shared model slot.
+3. **Publish:** atomically replace cards, indexes and session extraction state.
+   Embed cards outside the write transaction, then acknowledge success.
+4. **Retry:** incomplete extraction returns retryable HTTP 503. Replaying the same
+   request retries extraction without appending the committed chunks again.
+5. **Search:** read published cards only; do not extract pending sessions or
+   inject pending raw excerpts. A valid zero-card extraction also completes Add.
+
+Same-session mutations are serialised. Distinct sessions, including those of
+one user, extract concurrently within four shared model slots by default.
+Atomic publication and WAL recall snapshots prevent partially replaced cards;
+Search can read the previous complete publication during replacement.
+
+The Python default for synchronous finalisation is `false`, retaining the legacy
+lifecycle: an Add with a different `session_id` finalises older pending sessions,
+and Search finalises pending sessions as a backstop. Optional background
+finalisation and pending-session excerpt fallback apply only in this legacy mode.
 
 ## Search
 
@@ -90,6 +99,7 @@ Four card channels provide field-aware BM25, exact entities, IDF-weighted
 anchors and card embeddings (`text-embedding-v4`). Request `options` can supply
 a de-weighted probe. Reciprocal-rank fusion uses `k=60`; a deterministic score
 floor controls admission, followed by content budgets and `top_k` (at most 100).
+The default response ceiling is 10 memories (`CODEMEM_SEARCH_MAX_ITEMS`).
 
 The applicability judge and external reranker are soft, fail-open stages.
 Minimal cards must earn a channel hit, receive no `min_output_items` padding,
@@ -100,8 +110,11 @@ It analyses the issue once and judges at most 20 cards in one batch. Groups are
 transferable first; topic-related, unknown and unjudged in the middle; irrelevant
 last. It keeps candidates and their admission scores. Transferable results carry
 a separately labelled, unverified query-time hypothesis and issue quote, without
-changing stored cards. Grouped API responses omit `score`; failures preserve
-baseline ordering. The two model calls share a 60-second budget by default.
+changing stored cards. The model selects numbered evidence spans supplied by the
+program; IDs are checked against the current issue or owning card and the program
+fills in the original text. Diagnostics record stage timing, finish reasons and
+rejection counts without source text. Grouped API responses omit `score`; failures
+preserve baseline ordering. The two calls share a 60-second budget by default.
 
 ## API contract
 
@@ -116,7 +129,8 @@ baseline ordering. The two model calls share a 60-second budget by default.
 }
 ```
 
-The response echoes the identifiers with `success: true` after persistence.
+The response echoes the identifiers with `success: true` after persistence;
+synchronous finalisation also requires completed extraction before success.
 
 `POST /search`
 
@@ -152,8 +166,10 @@ overriding existing environment variables. The complete setting list is in
 | `CODEMEM_EXPERIENCE_EXTRACTION_VERSION` | `card-v4` | select `card-v4` or `card-v5-minimal` |
 | `CODEMEM_DB_PATH` | repository-root `data/codemem.db` | scoped memory store |
 | `CODEMEM_MINIMAL_SUMMARY_FALLBACK` | `true` | reconstruct minimal evidence without a summary |
-| `CODEMEM_FINALIZE_BACKGROUND` | `false` | extract the just-written session in the background |
-| `CODEMEM_SEARCH_PENDING_FALLBACK` | `false` | return pending-session chunk excerpts |
+| `CODEMEM_ADD_FINALIZE_SYNC` | `false` | wait for extraction before acknowledging Add; disable background/backstop/raw fallback |
+| `CODEMEM_FINALIZE_BACKGROUND` | `false` | legacy background finalisation, inactive in synchronous mode |
+| `CODEMEM_SEARCH_PENDING_FALLBACK` | `false` | legacy pending-session excerpts, inactive in synchronous mode |
+| `CODEMEM_SEARCH_MAX_ITEMS` | `10` | response ceiling, also bounded by `top_k` and content budgets |
 | `CODEMEM_TRANSFERABILITY_ENABLED` | `false` | enable minimal-card transferability grouping |
 | `CODEMEM_EMBED_CACHE_MEMORY_MB` | `16` | in-memory embedding-cache byte budget |
 
@@ -174,7 +190,6 @@ transferability, embedding caching, retrieval, API contracts and scope isolation
 Tests for offline library/view/index-building scripts are excluded because those
 scripts are outside the extracted algorithm repository.
 
-Verification on Windows (2026-10-31): 279 passed, one failed. The embedding-cache
-cross-instance concurrent-initialisation test also fails against the unchanged
-source project with an SQLite `OperationalError`; this sync preserves that source
-implementation.
+Verification on Windows (2026-10-31): **305 passed**. This includes synchronous
+Add acknowledgement/retry, same-session deduplication, concurrent session
+extraction, atomic publication, recall snapshots and evidence-ID validation.

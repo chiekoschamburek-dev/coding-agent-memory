@@ -8,8 +8,9 @@ stage 2 work.
 
 Two rules are enforced here rather than trusted to callers:
 
-* **No model call on the sync critical path.** ``complete_json`` is only ever
-  reachable from the best-effort enrichment phase, which has its own deadline.
+* **Bound model work.** The coding deployment waits for session extraction
+  before acknowledging Add. Extraction and query-time judgment have their own
+  deadlines and share bounded model concurrency.
 * **A dry run must not spend tokens.** ``probe()`` exists so connectivity,
   credentials and model availability can be verified before any extraction
   prompt is written, and it is validated locally before a single request is

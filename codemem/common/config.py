@@ -176,9 +176,9 @@ class Settings:
     # --- retrieval (plan.md section 6.2) -----------------------------------
     top_k_max: int = field(default_factory=lambda: _env_int("CODEMEM_TOP_K_MAX", 100))
     # The answer model is a tool-using agent: it has ~5 reads and 6 test runs.
-    # Honour the platform's top_k ceiling without an additional ten-card cap.
+    # Accept the platform's top_k=100 while returning at most ten memories.
     # Admission and content budgets still determine how many items qualify.
-    search_max_items: int = field(default_factory=lambda: _env_int("CODEMEM_SEARCH_MAX_ITEMS", 100))
+    search_max_items: int = field(default_factory=lambda: _env_int("CODEMEM_SEARCH_MAX_ITEMS", 10))
     # Candidates handed to the cross-encoder before the final cut: recall 20,
     # rerank all 20, then the floor + final response cut.
     rerank_candidates: int = field(default_factory=lambda: _env_int("CODEMEM_RERANK_CANDIDATES", 20))
@@ -301,6 +301,9 @@ class Settings:
     #   chunks as provisional items (lexical-overlap scored), so a Search
     #   issued immediately after Add always returns the content even when no
     #   card exists yet.  Cards replace provisional items once extracted.
+    # Coding deployment: one complete session per Add; finish extraction before
+    # acknowledging. Pending remains a durable retry state, not a Search path.
+    add_finalize_sync: bool = field(default_factory=lambda: _env_bool("CODEMEM_ADD_FINALIZE_SYNC", False))
     finalize_background: bool = field(default_factory=lambda: _env_bool("CODEMEM_FINALIZE_BACKGROUND", False))
     search_pending_fallback: bool = field(default_factory=lambda: _env_bool("CODEMEM_SEARCH_PENDING_FALLBACK", False))
     pending_fallback_max_sessions: int = field(default_factory=lambda: _env_int("CODEMEM_PENDING_FALLBACK_MAX_SESSIONS", 10))

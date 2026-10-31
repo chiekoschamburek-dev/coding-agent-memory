@@ -3,14 +3,20 @@
 Add flow:
 
     validate -> idempotency -> reserve key -> chunk (CPU) -> COMMIT (chunks)
-    -> finalise closed sessions (best-effort, LLM) -> return success
+    -> finalise this session (coding sync mode) -> return success
 
 The ordering matters: the idempotency key is reserved *before* any expensive
 work so concurrent duplicates cannot both proceed, and the success response is
 sent only after the chunk transaction has committed, so ``success: true``
 always means "persisted" as api_guide.md requires.
 
-Cards are extracted per **session**, not per Add. A session is considered
+Coding deployment acknowledges each Add only after extracting its session.
+Same-session mutations serialize; independent sessions share bounded model
+slots. Card replacement publishes atomically and Search uses a WAL snapshot.
+Extraction failures retain durable chunks for idempotent retries, return 503,
+and never inject unfinished raw content into Search.
+
+In legacy asynchronous mode, cards are extracted per **session**. A session is considered
 closed the moment an Add with a *different* session_id arrives (``session_id``
 change is the only end-of-session signal the API offers); Search finalises
 whatever is still pending as a backstop, so the last session of a scope also
@@ -48,7 +54,7 @@ from .add.experience import (
     render_experience,
 )
 from .common.guard import MODE_FULL, ModuleBudget, get_guard
-from .common.llm import get_llm
+from .common.llm import LLMUnavailable, get_llm
 from .add.minimal import (
     VERSION as MINIMAL_VERSION,
 )
@@ -166,13 +172,21 @@ def _content_words(text: str) -> list[str]:
 
 
 def _serialize_scope(method):
-    """Keep one scope's reads and card replacement consistent across threads."""
+    """Serialize session mutations; legacy async mode retains its scope lock."""
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         user_id = kwargs.get("user_id")
         if not isinstance(user_id, str) or not user_id:
             return method(self, *args, **kwargs)
-        with self._scope_lock(user_id):
+        key = user_id
+        if self.settings.add_finalize_sync:
+            # Independent sessions may extract concurrently. Search gets a WAL
+            # snapshot and never waits for an unrelated session's model call.
+            session_id = kwargs.get("session_id")
+            if method.__name__ not in {"add", "_finalize_session"} or not isinstance(session_id, str):
+                return method(self, *args, **kwargs)
+            key = (user_id, session_id)
+        with self._scope_lock(key):
             return method(self, *args, **kwargs)
     return wrapped
 
@@ -240,7 +254,7 @@ class MemoryService:
         self.guard = get_guard(self.settings)
         self.counter = get_counter(self.settings)
 
-    def _scope_lock(self, user_id: str):
+    def _scope_lock(self, user_id):
         # Waiters retain strong references; unused scope locks can disappear.
         with self._scope_locks_guard:
             lock = self._scope_locks.get(user_id)
@@ -384,6 +398,9 @@ class MemoryService:
                     f"cannot replay with different session_id={session_id}"
                 )
             # Idempotent replay: same key, same body, same session, already durable.
+            completion = []
+            if self.settings.add_finalize_sync:
+                completion = self._finish_add_session(user_id, session_id, state.ingestion_id)
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self.guard.observe(
                 elapsed_s=elapsed_ms / 1000.0,
@@ -397,7 +414,7 @@ class MemoryService:
                 session_id=session_id,
                 mode=state.mode,
                 deduplicated=True,
-                steps=[{"name": "idempotent_replay", "duration_ms": elapsed_ms, "skipped": True}],
+                steps=[{"name": "idempotent_replay", "duration_ms": elapsed_ms, "skipped": True}] + completion,
                 elapsed_ms=elapsed_ms,
             )
 
@@ -432,6 +449,21 @@ class MemoryService:
             raise
 
         sync_complete_ms = int((time.monotonic() - started) * 1000)
+
+        if self.settings.add_finalize_sync:
+            completion = self._finish_add_session(user_id, session_id, state.ingestion_id)
+            self.guard.observe(
+                elapsed_s=sync_complete_ms / 1000.0,
+                budget_s=self.settings.add_sync_budget_s,
+                overran=sync_complete_ms / 1000.0 > self.settings.add_sync_budget_s,
+            )
+            return AddOutcome(
+                success=True, request_id=request_id, user_id=user_id,
+                session_id=session_id, mode=mode,
+                steps=[{"name": s.name, "duration_ms": s.duration_ms, "skipped": s.skipped}
+                       for s in budget.steps] + completion,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
 
         # --- best-effort finalisation of closed sessions -----------------
         # This Add's session_id differs from earlier ones -> those sessions are
@@ -481,6 +513,23 @@ class MemoryService:
 
     # -- session finalisation ----------------------------------------------
 
+    def _finish_add_session(self, user_id: str, session_id: str, ingestion_id: int) -> list[dict]:
+        """Retry a committed snapshot without re-appending its chunks."""
+        if self.store.session_is_extracted(user_id, session_id):
+            return []
+        if not self.settings.experience_enabled:
+            raise LLMUnavailable("synchronous extraction is disabled")
+        step = self._finalize_session(
+            user_id=user_id, session_id=session_id,
+            trigger_ingestion_id=ingestion_id,
+            deadline=time.monotonic() + self.settings.add_enrich_budget_s,
+        )
+        if not self.store.session_is_extracted(user_id, session_id):
+            # A durable chunk commit is not a successful synchronous Add yet.
+            # Keep it for the platform's retry, but never serve its raw content.
+            raise LLMUnavailable("session extraction did not complete")
+        return [step]
+
     def _spawn_background_finalize(self, user_id: str, trigger_ingestion_id: int) -> dict:
         """Extract cards for the just-written session off the Add critical path.
 
@@ -492,7 +541,7 @@ class MemoryService:
         Search backstop stays as the fallback for anything this does not
         finish.  Failures leave the session pending and are retried there.
         """
-        if not self.settings.finalize_background or not self.settings.experience_enabled:
+        if self.settings.add_finalize_sync or not self.settings.finalize_background or not self.settings.experience_enabled:
             return {"name": "finalize_background", "duration_ms": 0, "skipped": True,
                     "reason": "disabled"}
         with self._bg_finalize_lock:
@@ -615,12 +664,13 @@ class MemoryService:
         session_chunks = self.store.fetch_session_chunks(user_id, session_id, limit=-1)
         keep = [chunk for chunk in session_chunks if not is_setup_chunk(chunk.text)]
         if not keep:
-            self.store.delete_session_experiences(user_id, session_id)
-            self.store.mark_session_extracted(
-                user_id=user_id, session_id=session_id,
-                extraction_version=self.settings.experience_extraction_version,
-                card_count=0,
-            )
+            with self.store.write_tx():
+                self.store.delete_session_experiences(user_id, session_id)
+                self.store.mark_session_extracted(
+                    user_id=user_id, session_id=session_id,
+                    extraction_version=self.settings.experience_extraction_version,
+                    card_count=0,
+                )
             return {**step, "duration_ms": int((_time.monotonic() - started) * 1000),
                     "skipped": True, "reason": "setup_only", "cards": 0}
 
@@ -645,8 +695,27 @@ class MemoryService:
             return {**step, "duration_ms": int((_time.monotonic() - started) * 1000),
                     "skipped": True, "reason": extract_stats.get("reason") or "extraction_failed"}
 
-        self.store.delete_session_experiences(user_id, session_id)
         chunks_by_id = {chunk.chunk_id: chunk for chunk in extract_keep}
+        if self.settings.add_finalize_sync:
+            # Publish all card/index/status changes atomically. Network-bound
+            # embedding happens after COMMIT, outside the SQLite writer lock.
+            with self.store.write_tx():
+                self.store.delete_session_experiences(user_id, session_id)
+                stored_ids = self._store_extracted_cards(
+                    cards, user_id=user_id, session_id=session_id,
+                    trigger_ingestion_id=trigger_ingestion_id,
+                    chunks_by_id=chunks_by_id, embed=False, strict=True,
+                )
+                self.store.mark_session_extracted(
+                    user_id=user_id, session_id=session_id,
+                    extraction_version=version, card_count=len(stored_ids),
+                )
+            if stored_ids:
+                self._embed_cards(user_id, cards)
+            return {**step, "duration_ms": int((_time.monotonic() - started) * 1000),
+                    "skipped": not stored_ids, "cards": len(stored_ids)}
+
+        self.store.delete_session_experiences(user_id, session_id)
         stored_ids = self._store_extracted_cards(
             cards,
             user_id=user_id,
@@ -712,10 +781,14 @@ class MemoryService:
             if not call_budget.take():
                 return [], False, {**stats, "reason": "call_budget"}
             limiter = get_model_limiter(self.settings)
-            if not limiter.acquire():
+            wait_s = max(0.0, remaining - 0.5) if self.settings.add_finalize_sync else None
+            if not limiter.acquire(timeout_s=wait_s):
                 return [], False, {**stats, "reason": "model_concurrency"}
             stats["calls"] += 1
             try:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0.5:
+                    return [], False, {**stats, "reason": "budget_exhausted"}
                 user = build_minimal_prompt(evidence, 1)
                 if repair_notes:
                     user += (
@@ -724,11 +797,13 @@ class MemoryService:
                         + "\n请只修正这些问题并重新输出完整 JSON；仍无依据时输出 "
                           '{"cards":[]}。'
                     )
+                call_options = {"max_retries": 0} if self.settings.add_finalize_sync else {}
                 parsed, result = llm.complete_json(
                     system=extraction_system_prompt(MINIMAL_VERSION),
                     user=user,
                     max_tokens=self.settings.experience_max_output_tokens,
                     timeout_s=remaining,
+                    **call_options,
                 )
             except Exception:
                 last_reason = "llm_error"
@@ -942,6 +1017,8 @@ class MemoryService:
         session_id: str,
         trigger_ingestion_id: int,
         chunks_by_id: dict,
+        embed: bool = True,
+        strict: bool = False,
     ) -> list[str]:
         if not cards:
             return []
@@ -988,8 +1065,10 @@ class MemoryService:
                 stored.append(card.experience_id)
                 written.append(card)
             except Exception:
+                if strict:
+                    raise
                 continue
-        if written:
+        if written and embed:
             self._embed_cards(user_id, written)
         return stored
 
@@ -1039,6 +1118,7 @@ class MemoryService:
         user_id, top_k, parsed_options = self.validate_search(
             user_id=user_id, query=query, top_k=top_k, options=options
         )
+        top_k = min(top_k, self.settings.search_max_items)
 
         budget = ModuleBudget(self.settings.search_hard_budget_s)
         data: list[dict] = []
@@ -1055,7 +1135,7 @@ class MemoryService:
         # without this its chunks would never become cards. The Add path also
         # leaves sessions pending when its own deadline ran out; this retries
         # them. Bounded so it cannot consume the whole search budget.
-        finalized = self._finalize_closed_sessions(
+        finalized = [] if self.settings.add_finalize_sync else self._finalize_closed_sessions(
             user_id=user_id,
             current_session_id=None,
             trigger_ingestion_id=0,
@@ -1131,7 +1211,7 @@ class MemoryService:
         ranking left free, and a zero-overlap session is dropped unless there
         are no card results at all.
         """
-        if not self.settings.search_pending_fallback or slots <= 0:
+        if self.settings.add_finalize_sync or not self.settings.search_pending_fallback or slots <= 0:
             return []
         limit = min(self.settings.pending_fallback_max_sessions, slots)
         pending = self.store.pending_sessions(user_id)[:limit]

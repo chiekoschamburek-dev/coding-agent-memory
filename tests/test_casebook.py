@@ -829,4 +829,3 @@ def test_search_returns_a_small_precise_set(store, settings, service):
     )
     outcome = service.search(user_id="u1", query="ConfigParseError", top_k=100)
     assert 0 < len(outcome.data) <= settings.search_max_items
-
